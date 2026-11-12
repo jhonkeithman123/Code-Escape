@@ -16,6 +16,19 @@ import java.util.Base64;
 import java.nio.charset.StandardCharsets;
 import javax.imageio.ImageIO;
 import javax.sound.sampled.*;
+import codeescape.core.animation.AnimationTiming;
+import codeescape.core.content.GameConfig;
+import codeescape.core.content.LevelMetadata;
+import codeescape.core.content.QuestionBank;
+import codeescape.core.content.StoryContent;
+import codeescape.core.model.PlayerProfile;
+import codeescape.core.model.Question;
+import codeescape.core.port.NarrationCallback;
+import codeescape.core.port.ProfileRepository;
+import codeescape.desktop.adapter.DesktopAudioAdapter;
+import codeescape.desktop.adapter.WindowsNarrationAdapter;
+import codeescape.desktop.persistence.FileProfileRepository;
+import codeescape.desktop.ui.components.*;
 
 public class CodeEscapeApp extends JFrame {
     private final CardLayout cards = new CardLayout();
@@ -27,6 +40,7 @@ public class CodeEscapeApp extends JFrame {
     private final Map<String, String> savedCharacters = new HashMap<>();
     private final Map<String, Integer> savedOutfits = new HashMap<>();
     private final Map<String, int[]> savedStyles = new HashMap<>();
+    private final FileProfileRepository profileRepository = new FileProfileRepository(new File("."));
 
     private JLabel[] hintEndingTextHolder = new JLabel[1];
     private String username = "";
@@ -39,37 +53,25 @@ public class CodeEscapeApp extends JFrame {
     private int selectedShoes = 1;
     private int selectedAccessory = 1;
 
-    private int xp = 0;
     // XP saved from before the current login. Gameplay XP resets to 0 each login.
     private int savedXp = 0;
-    // When an unfinished lesson is explicitly exited, the menu/dashboard must
-    // show 0 for the current run instead of displaying the previously saved XP.
-    // The saved XP itself is never deleted.
-    private boolean showZeroXpAfterCancelledRun = false;
-    private int hearts = 3;
-    private int level = 1;
-    private int questionIndex = 0;
-    private int secondsLeft = 15;
-    private int correctAnswers = 0;
-    private boolean sessionCommitted = false;
+    private int secondsLeft = GameConfig.MCQ_SECONDS;
 
     private javax.swing.Timer questionTimer;
-    private javax.swing.Timer runningTimer;
-    private Clip backgroundMusic;
-    private Process storySpeechProcess;
-    private Thread storySpeechThread;
-    private volatile int storySpeechGeneration = 0;
-    private JLabel activeStoryLabel;
-    private java.util.List<int[]> activeStoryRanges = new ArrayList<>();
-    private int activeStoryCurrent = -1;
+    private final codeescape.desktop.scheduler.SwingScheduler uiScheduler = new codeescape.desktop.scheduler.SwingScheduler();
+    private codeescape.desktop.ui.question.QuestionHudController questionHudController;
+    // Audio/music and narration ownership lives in the port adapters (DesktopAudioAdapter /
+    // WindowsNarrationAdapter); story-screen karaoke label state is owned by StoryScreenBuilder.
     private boolean storyMusicWasPlaying = false;
-    private boolean musicEnabled = true;
-    private float musicVolume = 0.45f;
-    private int currentMusicLevel = 1;
-    private MiniRunner menuRunner;
+    private final DesktopAudioAdapter audioAdapter = new DesktopAudioAdapter();
+    private final WindowsNarrationAdapter narrationAdapter = new WindowsNarrationAdapter();
+    // Narration is routed through the core NarrationPort contract (karaoke callback included).
+    private final codeescape.core.port.NarrationPort narrationPort = narrationAdapter;
     private JLabel timerLabel;
     private JLabel xpLabel;
     private JLabel heartsLabel;
+    private codeescape.desktop.ui.screens.QuestionScreen.HudRefs questionHudRefs;
+    private codeescape.desktop.ui.screens.QuestionScreen.Refs questionScreenRefs;
     private JLabel questionLabel;
     private JLabel questionCounterLabel;
     private JButton[] answerButtons = new JButton[4];
@@ -93,7 +95,7 @@ public class CodeEscapeApp extends JFrame {
     private JPanel answerGrid;
     private JPanel syntaxPanel;
     private boolean acceptingAnswer = false;
-    private BackgroundPanel questionBackground;
+    private codeescape.desktop.ui.components.BackgroundPanel questionBackground;
 
     private static final Color NAVY = new Color(18, 39, 68);
     private static final Color PANEL = new Color(20, 51, 86, 238);
@@ -108,120 +110,34 @@ public class CodeEscapeApp extends JFrame {
     private static final Color MINT = new Color(150, 247, 211);
 
     // A shuffled copy is created for every new lesson so the question order
-    // changes each time while keeping the same level structure.
+    // changes each time while keeping the same session().level structure.
     private Question[][] sessionQuestions = new Question[5][];
+    private final codeescape.core.engine.LessonEngine lessonEngine = new codeescape.core.engine.LessonEngine();
+    private codeescape.core.model.GameSession session() { return lessonEngine.getSession(); }
+    private final codeescape.core.flow.Navigator flowNavigator = new codeescape.core.flow.Navigator() {
+        @Override public void navigate(codeescape.core.flow.FlowState state) { navigate(state, session().level); }
+        @Override public void navigate(codeescape.core.flow.FlowState state, int level) {
+            if (state == codeescape.core.flow.FlowState.QUESTION) {
+                startQuestion();
+            } else {
+                showScreen(codeescape.core.flow.FlowTransitions.screenName(state));
+            }
+        }
+    };
 
-    private final Question[][] questions = {
-    {
-        q("Which HTML tag creates a paragraph?",
-                "<p>", "<h1>", "<br>", "<div>", 0), // ANSWER: <p>
-
-        q("Which HTML tag creates the largest heading?",
-                "<h6>", "<head>", "<h1>", "<title>", 2), // ANSWER: <h1>
-
-        q("Which HTML tag displays an image?",
-                "<image>", "<pic>", "<img>", "<src>", 2), // ANSWER: <img>
-
-        qs("Complete the HTML syntax to create a paragraph containing Hello World:",
-                "<p>Hello World</p>"),
-
-        qs("Complete the HTML syntax to display an image named photo.jpg:",
-                "<img src=\"photo.jpg\">"),
-        q("Which attribute provides alternate text for an HTML image?", "href", "alt", "srcset", "class", 1),
-        q("Which tag creates an ordered list?", "<ul>", "<ol>", "<li>", "<dl>", 1),
-        q("Which HTML attribute links a label to an input id?", "for", "name", "target", "rel", 0),
-        qs("Complete the HTML syntax for a line break:", "<br>"),
-        qs("Complete the HTML syntax for a link to index.html: <a ______>Home</a>", "href=\"index.html\""),
-    },
-
-    {
-        q("Which CSS property changes text color?",
-                "font-color", "text-color", "color", "foreground", 2), // ANSWER: color
-
-        q("Which selector targets an element by id?",
-                ".id", "#id", "*id", "@id", 1), // ANSWER: #id
-
-        q("Which CSS property changes the background color?",
-                "background-color", "bg-color", "color-background", "background", 0), // ANSWER: background-color
-
-        qs("Complete the CSS syntax to make paragraph text blue: p { ______ }",
-                "color: blue;"),
-
-        qs("Complete the CSS syntax to add a 10px margin: .box { ______: 10px; }",
-                "margin"),
-        q("Which CSS property rounds an element's corners?", "border-style", "corner-radius", "border-radius", "round", 2),
-        q("Which selector targets every paragraph?", "#p", ".p", "p", "@p", 2),
-        q("Which CSS property controls space inside an element's border?", "margin", "padding", "gap", "outline", 1),
-        qs("Complete the CSS syntax to select an element with class card: ______ { color: white; }", ".card"),
-        qs("Complete the CSS declaration for a 2px solid border: .box { ______ }", "border: 2px solid;"),
-    },
-
-    {
-        q("Which keyword declares a variable that can be reassigned in JavaScript?",
-                "const", "let", "static", "fixed", 1), // ANSWER: let
-
-        q("Which symbol is used for strict equality in JavaScript?",
-                "=", "==", "===", "!=", 2), // ANSWER: ===
-
-        q("Which method prints a message in the browser console?",
-                "console.log()", "print()", "writeLine()", "echo()", 0), // ANSWER: console.log()
-
-        qs("Complete the JavaScript syntax to declare score with the value 10:",
-                "let score = 10;"),
-
-        qs("Complete the JavaScript condition: if (score ______ 10) { console.log(\"Good\"); }",
-                ">="),
-        q("Which JavaScript structure repeats code while a condition is true?", "if", "while", "switch", "try", 1),
-        q("Which operator adds one to a number?", "--", "**", "++", "==", 2),
-        q("Which keyword returns a value from a function?", "give", "send", "return", "yielded", 2),
-        qs("Complete the JavaScript statement to show an alert: ______(\"Hello\");", "alert"),
-        qs("Complete the function call to print name: console.______(name);", "log"),
-    },
-
-    {
-        q("What should you check first when a webpage does not display correctly?",
-                "Only the volume", "The HTML structure and tags", "The keyboard", "The wallpaper", 1), // ANSWER: HTML structure and tags
-
-        q("Which character commonly ends a CSS declaration?",
-                ";", "?", "#", "@", 0), // ANSWER: ;
-
-        q("If JavaScript says a function is not defined, what should you check?",
-                "The screen size", "The function name and spelling", "The mouse", "The image size", 1), // ANSWER: function name and spelling
-
-        qs("Fix the missing closing brace: function greet() { console.log(\"Hello\"); ______",
-                "}"),
-
-        qs("Fix the missing HTML closing tag: <p>Hello World______",
-                "</p>"),
-        q("What does a syntax error usually mean?", "The code breaks language rules", "The monitor is off", "The file is too colorful", "The mouse is disconnected", 0),
-        q("Which browser tool helps inspect console errors?", "Calculator", "Developer Tools", "File Explorer", "Paint", 1),
-        q("What is a common cause of a missing-variable error?", "Variable name is misspelled", "Screen brightness", "Image format", "Speaker volume", 0),
-        qs("Complete the JavaScript comment for one line: ______ this line", "//"),
-        qs("Complete the HTML closing tag for a div: ______", "</div>"),
-    },
-
-    {
-        q("Which HTML element contains the main visible webpage content?",
-                "<head>", "<body>", "<meta>", "<title>", 1), // ANSWER: <body>
-
-        q("Which CSS property changes the size of text?",
-                "text-style", "font-size", "text-size", "font-height", 1), // ANSWER: font-size
-
-        q("Which JavaScript method prints to the console?",
-                "alert()", "console.log()", "printLine()", "display()", 1), // ANSWER: console.log()
-
-        qs("Complete the HTML button syntax: <button ______>Click</button>",
-                "type=\"button\""),
-
-        qs("Complete the CSS syntax to add 10px padding: .card { ______: 10px; }",
-                "padding"),
-        q("Which HTML tag connects an external CSS file?", "<style src>", "<css>", "<link>", "<script>", 2),
-        q("Which CSS layout system is useful for arranging items in rows or columns?", "Flexbox", "Console", "HTML", "Prompt", 0),
-        q("Which JavaScript keyword checks a condition?", "when", "if", "check", "caseif", 1),
-        qs("Complete the HTML script tag opening for app.js: <script ______>", "src=\"app.js\""),
-        qs("Complete the CSS syntax to center text: .title { text-align: ______; }", "center"),
+    /** Routes app-level flow events through the core transition contract when a target is defined. */
+    private void dispatch(codeescape.core.flow.FlowEvent event) {
+        codeescape.core.flow.FlowState target = codeescape.core.flow.FlowTransitions.targetFor(event);
+        if (target != null) flowNavigator.navigate(target);
     }
-};
+
+    /** Music playing state is owned by the audio adapter (AudioPort); no mirrored clip reference. */
+    private boolean isBackgroundMusicPlaying() {
+        Clip clip = audioAdapter.getClip();
+        return clip != null && clip.isRunning();
+    }
+
+    private final Question[][] questions = QuestionBank.canonical();
 
     private static Question q(String text, String a, String b, String c, String d, int correct) {
         return new Question(text, new String[]{a, b, c, d}, correct, false, null);
@@ -253,11 +169,8 @@ public class CodeEscapeApp extends JFrame {
             }
         });
 
-        accounts.put("demo", "demo");
-        emails.put("demo", "demo@codeescape.local");
-        loadScores();
-        loadUserDatabase();
-        scores.putIfAbsent("demo", 0);
+        loadPersistenceIntoCache();
+        ensureDemoAccount();
 
         buildScreens();
         showScreen("LOADING");
@@ -307,7 +220,7 @@ public class CodeEscapeApp extends JFrame {
         } else if ("LOGIN".equals(name) || "PROFILE".equals(name)) {
             playLevelMusic(5);
         } else if ("STORY_INTRO".equals(name)) {
-            playSpecialMusic("dungeon.wav");
+            playSpecialMusic(codeescape.core.content.AudioCatalog.TRACK_DUNGEON);
         } else if ("STORY_LEVEL2".equals(name)) {
             playLevelMusic(2);
         } else if ("STORY_LEVEL3".equals(name)) {
@@ -317,7 +230,7 @@ public class CodeEscapeApp extends JFrame {
         } else if ("STORY_LEVEL5".equals(name) || "ENDING".equals(name)) {
             playLevelMusic(5);
         } else if ("COMPLETE".equals(name)) {
-            playSpecialMusic("victory.wav");
+            playSpecialMusic(codeescape.core.content.AudioCatalog.TRACK_VICTORY);
         }
 
         if ("GAMEOVER".equals(name)) {
@@ -325,331 +238,163 @@ public class CodeEscapeApp extends JFrame {
             // original XP text would otherwise stay at 0. Refresh it with
             // the XP currently saved for the player.
             if (gameOverXpLabel != null) {
-                gameOverXpLabel.setText("Final XP: " + xp);
+                gameOverXpLabel.setText("Final XP: " + session().xp);
             }
         }
         if ("COMPLETE".equals(name)) {
-            if (completeXpLabel != null) completeXpLabel.setText("Final XP: " + xp);
+            if (completeXpLabel != null) completeXpLabel.setText("Final XP: " + session().xp);
             refreshProfile();
             refreshDashboard();
         }
         if ("MAIN_MENU".equals(name)) {
             refreshMainMenuXp();
-            refreshMenuRunner();
         }
         cards.show(root, name);
     }
 
     // ==================== WELCOME ====================
     private JPanel welcomeScreen() {
-        BackgroundPanel p = new BackgroundPanel("castle.png");
-        p.setLayout(new GridBagLayout());
-
-        JPanel box = panel(360, 640);
-        box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
-        box.setBackground(new Color(21, 54, 88, 238));
-        box.add(Box.createVerticalStrut(12));
-
-        JLabel logo = image("logo.png", 250, 155);
-        logo.setAlignmentX(Component.CENTER_ALIGNMENT);
-        box.add(logo);
-        addCenter(box, "Gamified Programming Learning System", 17, CREAM);
-        box.add(Box.createVerticalStrut(26));
-
-        JButton login = gold("LOGIN");
-        login.setPreferredSize(new Dimension(330, 54));
-        login.setMaximumSize(new Dimension(330, 54));
-        login.setAlignmentX(Component.CENTER_ALIGNMENT);
-        login.addActionListener(e -> showScreen("LOGIN"));
-        box.add(login);
-        box.add(Box.createVerticalStrut(14));
-
-        JButton signup = blue("SIGN UP / REGISTER");
-        signup.setPreferredSize(new Dimension(330, 54));
-        signup.setMaximumSize(new Dimension(330, 54));
-        signup.setAlignmentX(Component.CENTER_ALIGNMENT);
-        signup.addActionListener(e -> showScreen("REGISTER"));
-        box.add(signup);
-
-        p.add(box);
-        return p;
+        return codeescape.desktop.ui.screens.WelcomeScreen.create(new codeescape.desktop.ui.screens.WelcomeScreen.Ui() {
+            @Override public JPanel background(String name) { return new BackgroundPanel(name); }
+            @Override public JPanel panel(int w, int h) { return CodeEscapeApp.this.panel(w, h); }
+            @Override public JLabel image(String name, int w, int h) { return CodeEscapeApp.this.image(name, w, h); }
+            @Override public void addCenter(JPanel p, String text, int size, Color c) { CodeEscapeApp.this.addCenter(p, text, size, c); }
+            @Override public JLabel label(String text, int size, Color c) { return CodeEscapeApp.this.label(text, size, c); }
+            @Override public JButton gold(String text) { return CodeEscapeApp.this.gold(text); }
+            @Override public JButton blue(String text) { return CodeEscapeApp.this.blue(text); }
+            @Override public Color cream() { return CREAM; }
+        }, this::showScreen);
     }
 
     // ==================== LOADING ====================
     private JPanel loadingScreen() {
-        BackgroundPanel p = new BackgroundPanel("loading.png");
-        p.setLayout(new BorderLayout());
-        return p;
+        return codeescape.desktop.ui.screens.LoadingScreen.create(() -> {
+            BackgroundPanel p = new BackgroundPanel("loading.png");
+            p.setLayout(new BorderLayout());
+            return p;
+        });
     }
 
     private void startInitialLoading() {
-        javax.swing.Timer loadingTimer = new javax.swing.Timer(1800, e -> showScreen("LOGIN"));
-        loadingTimer.setRepeats(false);
-        loadingTimer.start();
+        // Startup -> login transition decided by the core flow contract.
+        uiScheduler.once(GameConfig.LOADING_DELAY_MS,
+                () -> dispatch(codeescape.core.flow.FlowEvent.of(codeescape.core.flow.FlowEvent.Type.STARTUP_COMPLETE)));
     }
 
     private void showLoadingThenCharacter() {
-    showScreen("LOADING");
-
-    javax.swing.Timer loadingTimer = new javax.swing.Timer(1800, e -> {
-        refreshDashboard();
-        refreshProfile();
-        showScreen("STORY_INTRO");
-    });
-
-    loadingTimer.setRepeats(false);
-    loadingTimer.start();
-}
+        showScreen("LOADING");
+        uiScheduler.once(GameConfig.LOADING_DELAY_MS, () -> {
+            refreshDashboard();
+            refreshProfile();
+            flowNavigator.navigate(codeescape.core.flow.FlowState.STORY_INTRO);
+        });
+    }
 
     // ==================== LOGIN ====================
     private JPanel loginScreen() {
-        BackgroundPanel p = new BackgroundPanel("level5.png");
-        p.setLayout(new GridBagLayout());
-        JPanel box = panel(350, 520);
-        box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
-        title(box, "LOGIN");
-
-        JTextField user = textField("Username / Email");
-        JPasswordField pass = passwordField("Password");
-        user.addActionListener(e -> pass.requestFocusInWindow());
-        box.add(user);
-        box.add(Box.createVerticalStrut(14));
-        box.add(pass);
-        box.add(Box.createVerticalStrut(24));
-
-        JButton b = gold("LOGIN");
-        b.setAlignmentX(Component.CENTER_ALIGNMENT);
-        b.addActionListener(e -> {
-            String u = user.getText().trim();
-            String pw = new String(pass.getPassword());
-            if (accounts.containsKey(u) && accounts.get(u).equals(pw)) {
-                username = u;
-                savedXp = 0;
-                email = emails.getOrDefault(u, "");
-                // A login always starts a fresh gameplay session. Previous
-                // completed attempts remain stored in savedXp/Profile, but
-                // the main menu/dashboard for this new login starts at 0 XP.
-                xp = 0;
-                showZeroXpAfterCancelledRun = true;
-                sessionCommitted = false;
-                hearts = 3;
-                level = 1;
-                questionIndex = 0;
-                correctAnswers = 0;
-                selectedCharacter = savedCharacters.getOrDefault(u, "Boy");
-                selectedOutfit = Math.max(0, Math.min(3, savedOutfits.getOrDefault(u, 0)));
-                int[] style = savedStyles.getOrDefault(u, new int[]{1,1,1,1});
-                selectedTop = style[0]; selectedBottom = style[1]; selectedShoes = style[2]; selectedAccessory = style[3];
-                showLoadingThenCharacter();
-            } else {
-                error("Invalid username or password.");
+        return codeescape.desktop.ui.screens.LoginScreen.create(new codeescape.desktop.ui.screens.LoginScreen.Host() {
+            @Override public JPanel background(String name) { return new BackgroundPanel(name); }
+            @Override public JPanel panel(int w, int h) { return CodeEscapeApp.this.panel(w, h); }
+            @Override public void title(JPanel box, String text) { CodeEscapeApp.this.title(box, text); }
+            @Override public JTextField textField(String tip) { return CodeEscapeApp.this.textField(tip); }
+            @Override public JPasswordField passwordField(String tip) { return CodeEscapeApp.this.passwordField(tip); }
+            @Override public JButton gold(String text) { return CodeEscapeApp.this.gold(text); }
+            @Override public JButton link(String text) { return CodeEscapeApp.this.link(text); }
+            @Override public JButton smallBlue(String text) { return CodeEscapeApp.this.smallBlue(text); }
+            @Override public JLabel label(String text, int size, Color c) { return CodeEscapeApp.this.label(text, size, c); }
+            @Override public Color cream() { return CREAM; }
+            @Override public void onLogin(String u, String pw, Runnable onSuccess, java.util.function.Consumer<String> onError) {
+                loadPersistenceIntoCache();
+                if (profileRepository.authenticate(u, pw)) {
+                    username = u;
+                    PlayerProfile p = profileRepository.findByUsername(u).orElse(new PlayerProfile(u, emails.getOrDefault(u, "")));
+                    savedXp = profileRepository.getLifetimeXp(u);
+                    email = p.email == null ? emails.getOrDefault(u, "") : p.email;
+                    session().username = u;
+                    lessonEngine.cancelRun(savedXp); // fresh run state, display 0 until committed/new lesson context
+                    session().xp = 0;
+                    selectedCharacter = p.character == null ? savedCharacters.getOrDefault(u, "Boy") : p.character;
+                    selectedOutfit = Math.max(0, Math.min(3, p.outfitVariant));
+                    selectedTop = p.selectedTop; selectedBottom = p.selectedBottom; selectedShoes = p.selectedShoes; selectedAccessory = p.selectedAccessory;
+                    scores.put(u, savedXp);
+                    showLoadingThenCharacter();
+                    onSuccess.run();
+                } else {
+                    onError.accept("Invalid username or password.");
+                }
             }
+            @Override public void showScreen(String name) { CodeEscapeApp.this.showScreen(name); }
         });
-        pass.addActionListener(e -> b.doClick());
-        box.add(b);
-        box.add(Box.createVerticalStrut(18));
-
-        JLabel signupPrompt = label("Don't have an account?", 12, CREAM);
-        signupPrompt.setAlignmentX(Component.CENTER_ALIGNMENT);
-        box.add(signupPrompt);
-        JButton signup = link("SIGN UP / REGISTER");
-        signup.setAlignmentX(Component.CENTER_ALIGNMENT);
-        signup.addActionListener(e -> showScreen("REGISTER"));
-        box.add(signup);
-
-        JButton back = smallBlue("← BACK");
-        back.addActionListener(e -> showScreen("WELCOME"));
-        box.add(Box.createVerticalStrut(12));
-        box.add(back);
-
-        p.add(box);
-        return p;
     }
-
     // ==================== REGISTER ====================
     private JPanel registerScreen() {
-        BackgroundPanel p = new BackgroundPanel("castle.png");
-        p.setLayout(new GridBagLayout());
-        JPanel box = panel(360, 590);
-        box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
-        title(box, "REGISTER");
-
-        JTextField user = textField("Username");
-        JTextField mail = textField("Email");
-        JPasswordField pass = passwordField("Password");
-        JPasswordField confirm = passwordField("Confirm Password");
-        user.addActionListener(e -> mail.requestFocusInWindow());
-        mail.addActionListener(e -> pass.requestFocusInWindow());
-        pass.addActionListener(e -> confirm.requestFocusInWindow());
-        box.add(user); box.add(Box.createVerticalStrut(10));
-        box.add(mail); box.add(Box.createVerticalStrut(10));
-        box.add(pass); box.add(Box.createVerticalStrut(10));
-        box.add(confirm); box.add(Box.createVerticalStrut(20));
-
-        JButton b = gold("REGISTER");
-        b.setAlignmentX(Component.CENTER_ALIGNMENT);
-        b.addActionListener(e -> {
-            String u = user.getText().trim();
-            String em = mail.getText().trim();
-            String pw = new String(pass.getPassword());
-            String cpw = new String(confirm.getPassword());
-            if (u.isEmpty() || em.isEmpty() || pw.isEmpty()) { error("Please complete all fields."); return; }
-            if (!pw.equals(cpw)) { error("Passwords do not match."); return; }
-            if (accounts.containsKey(u)) { error("Username already exists."); return; }
-            accounts.put(u, pw); emails.put(u, em); scores.put(u, 0);
-            savedCharacters.put(u, "Boy");
-            savedOutfits.put(u, 0);
-            savedStyles.put(u, new int[]{1,1,1,1});
-            username = u; email = em; savedXp = 0; xp = 0; showZeroXpAfterCancelledRun = false; sessionCommitted = false; hearts = 3; level = 1; questionIndex = 0; correctAnswers = 0;
-            selectedCharacter = "Boy";
-            selectedOutfit = 0;
-            selectedTop = 1; selectedBottom = 1; selectedShoes = 1; selectedAccessory = 1;
-            saveUserDatabase();
-            showLoadingThenCharacter();
-        });
-        confirm.addActionListener(e -> b.doClick());
-        box.add(b);
-        JButton back = smallBlue("← BACK TO LOGIN");
-        back.addActionListener(e -> showScreen("LOGIN"));
-        box.add(Box.createVerticalStrut(12)); box.add(back);
-        p.add(box);
-        return p;
-    }
-
-    // ==================== CHARACTER ====================
-    private JPanel characterScreen() {
-        BackgroundPanel p = new BackgroundPanel("castle.png");
-        p.setLayout(new BorderLayout(8, 8));
-
-        JLabel topTitle = label("CHOOSE YOUR CHARACTER", 28,
-                selectedCharacter.equals("Girl") ? PINK : BLUE);
-        topTitle.setHorizontalAlignment(SwingConstants.CENTER);
-        topTitle.setBorder(new EmptyBorder(12, 0, 4, 0));
-        p.add(topTitle, BorderLayout.NORTH);
-
-        JPanel center = new JPanel(new BorderLayout(12, 8));
-        center.setOpaque(false);
-
-        JPanel previewPanel = new JPanel(new BorderLayout(4, 8));
-        // Transparent preview: do not draw a white rectangle behind the character.
-        previewPanel.setOpaque(false);
-        previewPanel.setBackground(new Color(0, 0, 0, 0));
-        previewPanel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(new Color(83, 190, 255), 2),
-                new EmptyBorder(8, 8, 8, 8)));
-        previewPanel.setPreferredSize(new Dimension(190, 390));
-        previewPanel.setMinimumSize(new Dimension(125, 190));
-        JLabel characterPreview = new JLabel();
-        characterPreview.setHorizontalAlignment(SwingConstants.CENTER);
-        characterPreview.setVerticalAlignment(SwingConstants.CENTER);
-        previewPanel.add(characterPreview, BorderLayout.CENTER);
-
-        JLabel selectedLabel = label("", 14, new Color(20, 45, 80));
-        selectedLabel.setHorizontalAlignment(SwingConstants.CENTER);
-        previewPanel.add(selectedLabel, BorderLayout.SOUTH);
-        center.add(previewPanel, BorderLayout.WEST);
-        center.addComponentListener(new java.awt.event.ComponentAdapter() {
-            @Override public void componentResized(java.awt.event.ComponentEvent e) {
-                int availableW = center.getWidth();
-                int availableH = center.getHeight();
-                if (availableW < 760) {
-                    previewPanel.setPreferredSize(new Dimension(Math.max(125, availableW - 20), Math.max(190, Math.min(250, availableH / 3))));
-                } else {
-                    previewPanel.setPreferredSize(new Dimension(Math.max(190, Math.min(250, availableW / 4)), Math.max(300, availableH - 10)));
-                }
-                BufferedImage selectedImage = load(frontFacingFile(selectedCharacter));
-                if (selectedImage != null) {
-                    int pw = Math.max(80, previewPanel.getWidth() - 24);
-                    int ph = Math.max(100, previewPanel.getHeight() - 60);
-                    characterPreview.setIcon(new ImageIcon(scaleCharacter(selectedImage, Math.min(pw, 175), Math.min(ph, 315))));
-                }
-                previewPanel.revalidate();
+        return codeescape.desktop.ui.screens.RegisterScreen.create(new codeescape.desktop.ui.screens.RegisterScreen.Host() {
+            @Override public JPanel background(String name) { return new BackgroundPanel(name); }
+            @Override public JPanel panel(int w, int h) { return CodeEscapeApp.this.panel(w, h); }
+            @Override public void title(JPanel box, String text) { CodeEscapeApp.this.title(box, text); }
+            @Override public JTextField textField(String tip) { return CodeEscapeApp.this.textField(tip); }
+            @Override public JPasswordField passwordField(String tip) { return CodeEscapeApp.this.passwordField(tip); }
+            @Override public JButton gold(String text) { return CodeEscapeApp.this.gold(text); }
+            @Override public JButton smallBlue(String text) { return CodeEscapeApp.this.smallBlue(text); }
+            @Override public void onRegister(String u, String em, String pw, String cpw, Runnable onSuccess, java.util.function.Consumer<String> onError) {
+                loadPersistenceIntoCache();
+                if (u.isEmpty() || em.isEmpty() || pw.isEmpty()) { onError.accept("Please complete all fields."); return; }
+                if (!pw.equals(cpw)) { onError.accept("Passwords do not match."); return; }
+                if (accounts.containsKey(u) || profileRepository.findByUsername(u).isPresent()) { onError.accept("Username already exists."); return; }
+                PlayerProfile p = new PlayerProfile(u, em);
+                p.character = "Boy"; p.outfitVariant = 0; p.selectedTop = 1; p.selectedBottom = 1; p.selectedShoes = 1; p.selectedAccessory = 1;
+                p.lifetimeXp = 0; p.savedXp = 0;
+                profileRepository.saveAccount(u, em, pw, p);
+                loadPersistenceIntoCache();
+                username = u; email = em; savedXp = 0;
+                session().username = u;
+                lessonEngine.startNewLesson(savedXp);
+                session().showZeroXpAfterCancelledRun = false; // new account/session baseline
+                selectedCharacter = "Boy"; selectedOutfit = 0; selectedTop = 1; selectedBottom = 1; selectedShoes = 1; selectedAccessory = 1;
+                showLoadingThenCharacter();
+                onSuccess.run();
             }
+            @Override public void showScreen(String name) { CodeEscapeApp.this.showScreen(name); }
         });
+    }
+    // ==================== CHARACTER ====================
 
-        JPanel options = new JPanel();
-        options.setOpaque(false);
-        options.setLayout(new BoxLayout(options, BoxLayout.Y_AXIS));
-        options.setBorder(new EmptyBorder(4, 4, 4, 8));
-
-        JLabel hint = label("Choose a character, then choose 1 of 4 variants.", 16, GOLD);
-        hint.setAlignmentX(Component.CENTER_ALIGNMENT);
-        options.add(hint);
-        options.add(Box.createVerticalStrut(8));
-
-        JPanel genders = new JPanel(new GridLayout(1, 2, 8, 0));
-        genders.setOpaque(false);
-        JButton boy = smallBlue("BOY");
-        JButton girl = smallBlue("GIRL");
-        genders.add(boy);
-        genders.add(girl);
-        options.add(genders);
-        options.add(Box.createVerticalStrut(10));
-
-        JLabel variantTitle = label("CHARACTER VARIANTS", 14, CYAN);
-        variantTitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-        options.add(variantTitle);
-        options.add(Box.createVerticalStrut(5));
-
-        JPanel variants = new JPanel(new GridLayout(2, 2, 8, 8));
-        variants.setOpaque(false);
-        JButton[] variantButtons = new JButton[4];
-        for (int i = 0; i < 4; i++) {
-            final int variant = i;
-            variantButtons[i] = characterButton(frontFacingFile(selectedCharacter), "VARIANT " + (i + 1));
-            variantButtons[i].setPreferredSize(new Dimension(150, 220));
-            variantButtons[i].addActionListener(e -> {
-                // A variant changes only the outfit. It must never change the
-                // selected gender (Boy/Girl). This keeps Boy variants as Boy
-                // even after the variant images are refreshed.
-                String chosenCharacter = selectedCharacter;
-                selectedOutfit = variant;
-                selectedCharacter = chosenCharacter;
-                refreshVariantButtons(variantButtons);
-                refreshCharacterPreview(characterPreview, topTitle);
-                selectedLabel.setText("SELECTED: " + selectedCharacter.toUpperCase() + " • VARIANT " + (selectedOutfit + 1));
-            });
-            variants.add(variantButtons[i]);
-        }
-        options.add(variants);
-        center.add(options, BorderLayout.CENTER);
-
-        boy.addActionListener(e -> {
-            selectedCharacter = "Boy";
-            refreshVariantImages(variantButtons);
-            refreshCharacterPreview(characterPreview, topTitle);
-            selectedLabel.setText("SELECTED: BOY • VARIANT " + (selectedOutfit + 1));
+    private JPanel characterScreen() {
+        return codeescape.desktop.ui.screens.CharacterScreen.create(new codeescape.desktop.ui.screens.CharacterScreen.Host() {
+            @Override public java.awt.image.BufferedImage load(String name) { return CodeEscapeApp.this.load(name); }
+            @Override public java.awt.Image scale(java.awt.image.BufferedImage img, int w, int h) { return CodeEscapeApp.this.scale(img, w, h); }
+            @Override public java.awt.Image scaleCharacter(java.awt.image.BufferedImage img, int w, int h) { return CodeEscapeApp.this.scaleCharacter(img, w, h); }
+            @Override public JLabel label(String text, int size, Color c) { return CodeEscapeApp.this.label(text, size, c); }
+            @Override public JButton smallBlue(String text) { return CodeEscapeApp.this.smallBlue(text); }
+            @Override public JButton gold(String text) { return CodeEscapeApp.this.gold(text); }
+            @Override public Color pink() { return PINK; }
+            @Override public Color blue() { return BLUE; }
+            @Override public Color goldColor() { return GOLD; }
+            @Override public Color cyan() { return CYAN; }
+            @Override public String getSelectedCharacter() { return selectedCharacter; }
+            @Override public void setSelectedCharacter(String c) { selectedCharacter = c; }
+            @Override public int getSelectedOutfit() { return selectedOutfit; }
+            @Override public void setSelectedOutfit(int o) { selectedOutfit = o; }
+            @Override public String frontFacingFile(String character) { return CodeEscapeApp.this.frontFacingFile(character); }
+            @Override public String characterVariantFile(String character, int variant) { return CodeEscapeApp.this.characterVariantFile(character, variant); }
+            @Override public void onSaveAndContinue() {
+                // Character/style selection is persisted through the repository; the cache
+                // is re-synced from it right after save (single source of ownership).
+                if (username != null && !username.isEmpty()) {
+                    profileRepository.saveProfile(snapshotCurrentProfile());
+                    loadPersistenceIntoCache();
+                } else {
+                    saveUserDatabase();
+                }
+                refreshDashboard();
+                refreshProfile();
+                flowNavigator.navigate(codeescape.core.flow.FlowState.DASHBOARD);
+            }
+            @Override public void refreshCharacterPreview(JLabel preview, JLabel topTitle) { CodeEscapeApp.this.refreshCharacterPreview(preview, topTitle); }
+            @Override public void refreshVariantButtons(JButton[] buttons) { CodeEscapeApp.this.refreshVariantButtons(buttons); }
+            @Override public void refreshVariantImages(JButton[] buttons) { CodeEscapeApp.this.refreshVariantImages(buttons); }
+            @Override public JButton characterButton(String img, String txt) { return CodeEscapeApp.this.characterButton(img, txt); }
         });
-        girl.addActionListener(e -> {
-            selectedCharacter = "Girl";
-            refreshVariantImages(variantButtons);
-            refreshCharacterPreview(characterPreview, topTitle);
-            selectedLabel.setText("SELECTED: GIRL • VARIANT " + (selectedOutfit + 1));
-        });
-
-        JPanel bottom = new JPanel(new FlowLayout(FlowLayout.CENTER));
-        bottom.setOpaque(false);
-        JButton cont = gold("SAVE CHARACTER & CONTINUE");
-        cont.addActionListener(e -> {
-            savedCharacters.put(username, selectedCharacter);
-            savedOutfits.put(username, selectedOutfit);
-            // Keep the old style map for compatibility with existing saved data,
-            // but the new character system uses only the four variants.
-            savedStyles.put(username, new int[]{selectedTop, selectedBottom, selectedShoes, selectedAccessory});
-            saveUserDatabase();
-            refreshDashboard();
-            refreshProfile();
-            refreshMenuRunner();
-            showScreen("DASHBOARD");
-        });
-        bottom.add(cont);
-        p.add(center, BorderLayout.CENTER);
-        p.add(bottom, BorderLayout.SOUTH);
-
-        refreshVariantButtons(variantButtons);
-        refreshCharacterPreview(characterPreview, topTitle);
-        selectedLabel.setText("SELECTED: " + selectedCharacter.toUpperCase() + " • VARIANT " + (selectedOutfit + 1));
-        return p;
     }
 
     private void refreshVariantImages(JButton[] buttons) {
@@ -815,7 +560,7 @@ public class CodeEscapeApp extends JFrame {
         welcome.setHorizontalAlignment(SwingConstants.CENTER);
         top.add(welcome, BorderLayout.CENTER);
 
-        JLabel musicStatus = label(musicEnabled ? "♫ ON" : "♫ OFF", 12, musicEnabled ? MINT : PEACH);
+        JLabel musicStatus = label(audioAdapter.isEnabled() ? "♫ ON" : "♫ OFF", 12, audioAdapter.isEnabled() ? MINT : PEACH);
         musicStatus.setHorizontalAlignment(SwingConstants.RIGHT);
         top.add(musicStatus, BorderLayout.EAST);
         p.add(top, BorderLayout.NORTH);
@@ -832,7 +577,7 @@ public class CodeEscapeApp extends JFrame {
         menu.add(title);
         menu.add(Box.createVerticalStrut(8));
 
-        mainMenuXpLabel = label("★  XP: " + (showZeroXpAfterCancelledRun ? 0 : savedXp), 19, GOLD);
+        mainMenuXpLabel = label("★  XP: " + (session().showZeroXpAfterCancelledRun ? 0 : savedXp), 19, GOLD);
         mainMenuXpLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
         menu.add(mainMenuXpLabel);
         menu.add(Box.createVerticalStrut(8));
@@ -843,7 +588,6 @@ public class CodeEscapeApp extends JFrame {
         menu.add(Box.createVerticalStrut(18));
 
         // Keep the selected color variant, using its front-facing still image.
-        menuRunner = null;
         JPanel avatarFrame = new JPanel(new BorderLayout());
         avatarFrame.setBackground(new Color(5, 27, 61, 220));
         avatarFrame.setBorder(BorderFactory.createCompoundBorder(
@@ -856,7 +600,6 @@ public class CodeEscapeApp extends JFrame {
 
         JButton play = menuGameButton("▶  PLAY", GOLD);
         play.addActionListener(e -> {
-            stopMiniRunners();
             refreshDashboard();
             startNewLesson();
         });
@@ -886,20 +629,8 @@ public class CodeEscapeApp extends JFrame {
         return p;
     }
 
-    private void stopMiniRunners() {
-        if (menuRunner != null) menuRunner.stop();
-    }
-
     private void refreshMainMenuXp() {
-        if (mainMenuXpLabel != null) mainMenuXpLabel.setText("★  XP: " + (showZeroXpAfterCancelledRun ? 0 : savedXp));
-    }
-
-    private void refreshMenuRunner() {
-        if (menuRunner != null) {
-            menuRunner.setCharacter(
-                runnerOutfitFile(selectedCharacter, selectedOutfit)
-            );
-        }
+        if (mainMenuXpLabel != null) mainMenuXpLabel.setText("★  XP: " + (session().showZeroXpAfterCancelledRun ? 0 : savedXp));
     }
 
     private JButton menuGameButton(String text, Color accent) {
@@ -936,13 +667,13 @@ public class CodeEscapeApp extends JFrame {
         box.add(Box.createVerticalStrut(18));
 
         JCheckBox music = new JCheckBox("Background Music");
-        music.setSelected(musicEnabled);
+        music.setSelected(audioAdapter.isEnabled());
         music.setForeground(WHITE);
         music.setBackground(NAVY);
         music.setFont(new Font("SansSerif", Font.BOLD, 17));
         music.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-        JSlider volume = new JSlider(0, 100, Math.round(musicVolume * 100));
+        JSlider volume = new JSlider(0, 100, Math.round(audioAdapter.getVolume() * 100));
         volume.setOpaque(false);
         volume.setAlignmentX(Component.CENTER_ALIGNMENT);
         volume.setMaximumSize(new Dimension(280, 45));
@@ -951,18 +682,18 @@ public class CodeEscapeApp extends JFrame {
         volumeText.setAlignmentX(Component.CENTER_ALIGNMENT);
 
         music.addActionListener(e -> {
-            musicEnabled = music.isSelected();
-            if (musicEnabled) startBackgroundMusic();
+            // Audio enable/disable state is owned by the AudioPort adapter.
+            audioAdapter.setEnabled(music.isSelected());
+            if (music.isSelected()) startBackgroundMusic();
             else stopBackgroundMusic();
             if (musicStatus != null) {
-                musicStatus.setText(musicEnabled ? "♫ MUSIC ON" : "♫ MUSIC OFF");
-                musicStatus.setForeground(musicEnabled ? MINT : PEACH);
+                musicStatus.setText(audioAdapter.isEnabled() ? "♫ MUSIC ON" : "♫ MUSIC OFF");
+                musicStatus.setForeground(audioAdapter.isEnabled() ? MINT : PEACH);
             }
         });
 
         volume.addChangeListener(e -> {
-            musicVolume = volume.getValue() / 100f;
-            setMusicVolume(musicVolume);
+            setMusicVolume(volume.getValue() / 100f);
             volumeText.setText("Volume: " + volume.getValue() + "%");
         });
 
@@ -1025,134 +756,36 @@ public class CodeEscapeApp extends JFrame {
 
     // ==================== DASHBOARD ====================
     private JPanel dashboardScreen() {
-        BackgroundPanel p = new BackgroundPanel("castle.png");
-        p.setLayout(new BorderLayout());
-
-        // Logo stays in the upper-left while the dashboard content is split
-        // into two clear sections: character/XP on the LEFT and buttons on
-        // the RIGHT, matching the requested main-menu layout.
-        JPanel top = new JPanel(new BorderLayout());
-        top.setOpaque(false);
-        top.setBorder(new EmptyBorder(10, 16, 0, 18));
-
-        JLabel logo = image("logo.png", 105, 62);
-        top.add(logo, BorderLayout.WEST);
-        p.add(top, BorderLayout.NORTH);
-
-        JPanel content = new JPanel(new GridBagLayout());
-        content.setOpaque(false);
-        content.setBorder(new EmptyBorder(20, 28, 28, 28));
-
-        GridBagConstraints leftGbc = new GridBagConstraints();
-        leftGbc.gridx = 0;
-        leftGbc.gridy = 0;
-        leftGbc.weightx = 0.52;
-        leftGbc.weighty = 1.0;
-        leftGbc.fill = GridBagConstraints.BOTH;
-        leftGbc.anchor = GridBagConstraints.CENTER;
-        leftGbc.insets = new Insets(0, 0, 0, 22);
-
-        GridBagConstraints rightGbc = new GridBagConstraints();
-        rightGbc.gridx = 1;
-        rightGbc.gridy = 0;
-        rightGbc.weightx = 0.48;
-        rightGbc.weighty = 1.0;
-        rightGbc.fill = GridBagConstraints.BOTH;
-        rightGbc.anchor = GridBagConstraints.CENTER;
-        rightGbc.insets = new Insets(0, 22, 0, 0);
-
-        // ================= LEFT: CHARACTER + XP =================
-        JPanel characterPanel = new JPanel();
-        characterPanel.setOpaque(false);
-        characterPanel.setLayout(new BoxLayout(characterPanel, BoxLayout.Y_AXIS));
-
-        JLabel welcomeTitle = label("CODE ESCAPE", 32, GOLD);
-        welcomeTitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-        welcomeTitle.setHorizontalAlignment(SwingConstants.CENTER);
-        characterPanel.add(welcomeTitle);
-
-        dashboardWelcome = label(
-            "WELCOME, " + (username.isEmpty() ? "PLAYER" : username).toUpperCase(),
-            17,
-            CREAM
-        );
-        dashboardWelcome.setAlignmentX(Component.CENTER_ALIGNMENT);
-        characterPanel.add(Box.createVerticalStrut(5));
-        characterPanel.add(dashboardWelcome);
-        characterPanel.add(Box.createVerticalStrut(12));
-
-        JPanel characterCard = new JPanel();
-        characterCard.setOpaque(true);
-        characterCard.setBackground(new Color(5, 28, 67, 225));
-        characterCard.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(new Color(88, 218, 255), 2),
-            new EmptyBorder(12, 18, 14, 18)
-        ));
-        characterCard.setLayout(new BoxLayout(characterCard, BoxLayout.Y_AXIS));
-        characterCard.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-        dashboardAvatar = image(
+        codeescape.desktop.ui.screens.DashboardScreen.Refs refs = new codeescape.desktop.ui.screens.DashboardScreen.Refs();
+        JPanel p = codeescape.desktop.ui.screens.DashboardScreen.create(
+            new codeescape.desktop.ui.screens.DashboardScreen.Host() {
+                @Override public JPanel background(String name) { return new BackgroundPanel(name); }
+                @Override public JLabel image(String name, int w, int h) { return CodeEscapeApp.this.image(name, w, h); }
+                @Override public JLabel label(String text, int size, Color c) { return CodeEscapeApp.this.label(text, size, c); }
+                @Override public JButton dashboardActionButton(String text, Color accent) { return CodeEscapeApp.this.dashboardActionButton(text, accent); }
+                @Override public Color gold() { return GOLD; }
+                @Override public Color cream() { return CREAM; }
+                @Override public Color cyan() { return CYAN; }
+                @Override public Color pink() { return PINK; }
+                @Override public Color blue() { return BLUE; }
+                @Override public Color red() { return RED; }
+            },
+            refs,
+            username,
+            selectedCharacter,
+            selectedOutfit,
             outfitFile(selectedCharacter, selectedOutfit),
-            210,
-            300
+            (session().xp > 0 ? session().xp : savedXp),
+            () -> startNewLesson(),
+            () -> { refreshProfile(); dispatch(codeescape.core.flow.FlowEvent.of(codeescape.core.flow.FlowEvent.Type.PROFILE_OPENED)); },
+            () -> { session().xp = 0; stopBackgroundMusic(); System.exit(0); }
         );
-        dashboardAvatar.setAlignmentX(Component.CENTER_ALIGNMENT);
-        characterCard.add(dashboardAvatar);
-
-        dashboardCharacterLabel = label(
-            selectedCharacter.toUpperCase(),
-            25,
-            selectedCharacter.equals("Girl") ? PINK : CYAN
-        );
-        dashboardCharacterLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-        characterCard.add(Box.createVerticalStrut(4));
-        characterCard.add(dashboardCharacterLabel);
-
-        dashboardXpLabel = label("★  XP: " + (xp > 0 ? xp : savedXp), 28, GOLD);
-        dashboardXpLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-        characterCard.add(Box.createVerticalStrut(4));
-        characterCard.add(dashboardXpLabel);
-
-        characterPanel.add(characterCard);
-
-        // ================= RIGHT: MENU BUTTONS =================
-        JPanel buttonPanel = new JPanel();
-        buttonPanel.setOpaque(false);
-        buttonPanel.setLayout(new BoxLayout(buttonPanel, BoxLayout.Y_AXIS));
-
-        JLabel menuTitle = label("MAIN MENU", 30, GOLD);
-        menuTitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-        buttonPanel.add(menuTitle);
-        buttonPanel.add(Box.createVerticalStrut(18));
-
-        JButton play = dashboardActionButton("▶  PLAY", GOLD);
-play.addActionListener(e -> startNewLesson());
-buttonPanel.add(play);
-buttonPanel.add(Box.createVerticalStrut(12));
-
-JButton profile = dashboardActionButton("PROFILE", BLUE);
-profile.addActionListener(e -> {
-    refreshProfile();
-    showScreen("PROFILE");
-});
-buttonPanel.add(profile);
-buttonPanel.add(Box.createVerticalStrut(12));
-
-JButton exit = dashboardActionButton("EXIT", RED);
-exit.addActionListener(e -> {
-    // Do not save a still-active lesson attempt when leaving the game.
-    xp = 0;
-    stopBackgroundMusic();
-    System.exit(0);
-});
-buttonPanel.add(exit);
-
-content.add(characterPanel, leftGbc);
-content.add(buttonPanel, rightGbc);
-p.add(content, BorderLayout.CENTER);
-
-return p;
-}
+        this.dashboardAvatar = refs.dashboardAvatar;
+        this.dashboardCharacterLabel = refs.dashboardCharacterLabel;
+        this.dashboardWelcome = refs.dashboardWelcome;
+        this.dashboardXpLabel = refs.dashboardXpLabel;
+        return p;
+    }
 
     private void refreshDashboard() {
     if (dashboardAvatar != null) {
@@ -1181,7 +814,7 @@ return p;
     }
 
     if (dashboardXpLabel != null) {
-        int displayedXp = showZeroXpAfterCancelledRun ? 0 : savedXp;
+        int displayedXp = session().showZeroXpAfterCancelledRun ? 0 : savedXp;
         dashboardXpLabel.setText("★  XP: " + displayedXp);
         dashboardXpLabel.setForeground(GOLD);
     }
@@ -1193,128 +826,36 @@ return p;
     private void startNewLesson() {
         // Every new lesson is a fresh attempt. Previously committed XP remains
         // in savedXp and is shown in Profile.
-        xp = 0;
-        showZeroXpAfterCancelledRun = false;
-        sessionCommitted = false;
-        hearts = 3;
-        level = 1;
-        questionIndex = 0;
-        correctAnswers = 0;
+        lessonEngine.startNewLesson();
+        session().xp = lessonEngine.getXp();
+        session().hearts = lessonEngine.getHearts();
+        session().level = lessonEngine.getLevel();
+        session().questionIndex = lessonEngine.getQuestionIndex();
+        session().correctAnswers = lessonEngine.getCorrectAnswers();
+        session().showZeroXpAfterCancelledRun = false;
+        session().sessionCommitted = false;
+        sessionQuestions = new Question[questions.length][]; // legacy field retained for compatibility
         playLevelMusic(1);
-
-        // Shuffle the questions for every new attempt so the player cannot
-        // memorize the fixed question order. Each level still contains its
-        // own five questions.
-        sessionQuestions = new Question[questions.length][];
-        for (int i = 0; i < questions.length; i++) {
-            java.util.List<Question> attemptQuestions = new ArrayList<>(Arrays.asList(questions[i]));
-            // Shuffle all ten together: syntax and multiple-choice questions can
-            // appear in any position on every attempt.
-            Collections.shuffle(attemptQuestions);
-            // Clone each question and shuffle its answer choices independently.
-            // Move the correct-answer index with the correct text so grading
-            // remains accurate regardless of the displayed button position.
-            for (int qi = 0; qi < attemptQuestions.size(); qi++) {
-                Question original = attemptQuestions.get(qi);
-                if (!original.syntax && original.answers != null && original.answers.length > 1) {
-                    java.util.List<Integer> order = new ArrayList<>();
-                    for (int a = 0; a < original.answers.length; a++) order.add(a);
-                    Collections.shuffle(order);
-                    String[] shuffledAnswers = new String[original.answers.length];
-                    int shuffledCorrect = -1;
-                    for (int a = 0; a < order.size(); a++) {
-                        int oldIndex = order.get(a);
-                        shuffledAnswers[a] = original.answers[oldIndex];
-                        if (oldIndex == original.correct) shuffledCorrect = a;
-                    }
-                    attemptQuestions.set(qi, new Question(original.text, shuffledAnswers,
-                            shuffledCorrect, false, original.expected));
-                } else {
-                    attemptQuestions.set(qi, new Question(original.text,
-                            original.answers == null ? new String[0] : original.answers.clone(),
-                            original.correct, original.syntax, original.expected));
-                }
-            }
-            sessionQuestions[i] = attemptQuestions.toArray(new Question[0]);
-        }
-
         startQuestion();
     }
     
     private JPanel createStoryScreen(
         String titleText, String storyText, String buttonText, String background, Runnable nextAction) {
-
-        BackgroundPanel p = new BackgroundPanel(background);
-        p.setLayout(new GridBagLayout());
-
-        JPanel content = new JPanel(new BorderLayout(10, 16));
-        content.setOpaque(false);
-        int screenW = getWidth() > 0 ? getWidth() : 430;
-        int screenH = getHeight() > 0 ? getHeight() : 760;
-        int cw = Math.min(980, Math.max(320, screenW - 34));
-        int ch = Math.min(680, Math.max(470, screenH - 55));
-        content.setPreferredSize(new Dimension(cw, ch));
-        content.setMaximumSize(new Dimension(980, 680));
-        content.setBorder(new EmptyBorder(8, 12, 8, 12));
-
-        JLabel title = label(titleText, screenW <= 500 ? 25 : 30, GOLD);
-        title.setHorizontalAlignment(SwingConstants.CENTER);
-        title.setAlignmentX(Component.CENTER_ALIGNMENT);
-        content.add(title, BorderLayout.NORTH);
-
-        JPanel storyHolder = new JPanel(new GridBagLayout()) {
-            @Override protected void paintComponent(Graphics g) {
-                Graphics2D g2=(Graphics2D)g.create();
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,RenderingHints.VALUE_ANTIALIAS_ON);
-                g2.setColor(new Color(16, 43, 72, 158));
-                g2.fillRoundRect(12,12,getWidth()-24,getHeight()-24,28,28);
-                g2.dispose();
-                super.paintComponent(g);
-            }
-        };
-        storyHolder.setOpaque(false);
-        storyHolder.setBorder(new EmptyBorder(14, 18, 14, 18));
-        // Keep the story card compact so it does not dominate the screen.
-        // The text itself is wrapped inside a fixed-width area below.
-        int storyCardWidth = Math.min(cw - 36, screenW <= 500 ? 360 : 620);
-        storyHolder.setPreferredSize(new Dimension(Math.max(300, storyCardWidth), 205));
-        storyHolder.setMaximumSize(new Dimension(Math.max(300, storyCardWidth), 220));
-
-        JLabel story = new JLabel();
-        story.setHorizontalAlignment(SwingConstants.CENTER);
-        story.setVerticalAlignment(SwingConstants.CENTER);
-        story.setForeground(Color.WHITE);
-        story.setFont(new Font("SansSerif", Font.BOLD, screenW <= 500 ? 19 : 23));
-        story.setOpaque(false);
-        int storyWidth = Math.max(260, Math.min(storyCardWidth - 28, screenW <= 500 ? 315 : 560));
-        int storyHeight = 165;
-        story.setPreferredSize(new Dimension(storyWidth, storyHeight));
-        story.setMaximumSize(new Dimension(storyWidth, storyHeight));
-        java.util.List<int[]> initialRanges = buildStoryRanges(storyText);
-        String initialLine = initialRanges.isEmpty() ? storyText : storyText.substring(initialRanges.get(0)[0], initialRanges.get(0)[1]).trim();
-        story.setText(wrapStoryHtml(initialLine, screenW <= 500 ? 23 : 36));
-        activeStoryLabel = story;
-        activeStoryRanges = buildStoryRanges(storyText);
-        activeStoryCurrent = -1;
-        storyHolder.add(story, new GridBagConstraints());
-        content.add(storyHolder, BorderLayout.CENTER);
-
-        JButton read=blue("🔊 READ STORY"); read.setPreferredSize(new Dimension(165,48)); read.addActionListener(e->speakStoryKaraoke(storyText,story));
-        JButton skip=blue("SKIP ▶"); skip.setPreferredSize(new Dimension(135,48)); skip.addActionListener(e->{stopStorySpeech();nextAction.run();});
-        JButton next=gold(buttonText); next.setPreferredSize(new Dimension(190,48)); next.addActionListener(e->{stopStorySpeech();nextAction.run();});
-        JPanel bottom=new JPanel(new FlowLayout(FlowLayout.CENTER,10,5)); bottom.setOpaque(false); bottom.add(read); bottom.add(skip); bottom.add(next);
-        content.add(bottom,BorderLayout.SOUTH);
-
-        p.addComponentListener(new java.awt.event.ComponentAdapter(){
-            @Override public void componentShown(java.awt.event.ComponentEvent e){
-                speakStoryKaraoke(storyText,story);
-            }
-            @Override public void componentHidden(java.awt.event.ComponentEvent e){stopStorySpeech();}
-        });
-        p.add(content);
-        return p;
+        return codeescape.desktop.ui.screens.StoryScreenBuilder.create(new codeescape.desktop.ui.screens.StoryScreenBuilder.Host() {
+            @Override public JPanel background(String name) { return new BackgroundPanel(name); }
+            @Override public JLabel label(String text, int size, Color c) { return CodeEscapeApp.this.label(text, size, c); }
+            @Override public JButton blue(String text) { return CodeEscapeApp.this.blue(text); }
+            @Override public JButton gold(String text) { return CodeEscapeApp.this.gold(text); }
+            @Override public Color goldColor() { return GOLD; }
+            @Override public int getWidthSafe() { return getWidth() > 0 ? getWidth() : 430; }
+            @Override public int getHeightSafe() { return getHeight() > 0 ? getHeight() : 760; }
+            @Override public java.util.List<int[]> buildStoryRanges(String text) { return CodeEscapeApp.this.buildStoryRanges(text); }
+            @Override public String wrapStoryHtml(String text, int maxChars) { return CodeEscapeApp.this.wrapStoryHtml(text, maxChars); }
+            @Override public void speakStoryKaraoke(String text, JLabel label) { CodeEscapeApp.this.speakStoryKaraoke(text, label); }
+            @Override public void stopStorySpeech() { CodeEscapeApp.this.stopStorySpeech(); }
+            @Override public void setActiveStory(JLabel story, java.util.List<int[]> ranges) { /* karaoke state owned by the story screen builder */ }
+        }, titleText, storyText, buttonText, background, nextAction);
     }
-
     private String htmlEscape(String text) {
         if (text == null) return "";
         return text.replace("&", "&amp;")
@@ -1324,7 +865,7 @@ return p;
                    .replace("\n", "<br>");
     }
 
-    private java.util.List<int[]> buildStoryRanges(String text) {
+    public java.util.List<int[]> buildStoryRanges(String text) {
         java.util.List<int[]> ranges = new ArrayList<>();
         java.util.regex.Matcher m = java.util.regex.Pattern.compile("[^.!?]+[.!?]+|[^.!?]+$").matcher(text);
         while (m.find()) {
@@ -1336,7 +877,7 @@ return p;
         return ranges;
     }
 
-    private void showStoryLyric(JLabel label, String text, int index, java.util.List<int[]> ranges) {
+    public void showStoryLyric(JLabel label, String text, int index, java.util.List<int[]> ranges) {
         if (label == null || index < 0 || index >= ranges.size()) return;
         String line = text.substring(ranges.get(index)[0], ranges.get(index)[1]).trim();
         int maxChars = label.getWidth() > 500 ? 36 : 23;
@@ -1345,7 +886,6 @@ return p;
             label.setText(html);
             label.setHorizontalAlignment(SwingConstants.CENTER);
             label.setVerticalAlignment(SwingConstants.CENTER);
-            activeStoryCurrent = index;
             fadeStoryLine(label);
         });
     }
@@ -1353,7 +893,7 @@ return p;
     // Wrap every story sentence into several short lines. Keeping the line
     // length controlled is more reliable than relying on Swing HTML width,
     // especially on smaller laptop screens where the old text was clipped.
-    private String wrapStoryHtml(String text, int maxChars) {
+    public String wrapStoryHtml(String text, int maxChars) {
         if (text == null) return "<html><div style='text-align:center;'></div></html>";
         String[] words = text.trim().split("\\s+");
         java.util.List<String> lines = new ArrayList<>();
@@ -1402,206 +942,90 @@ return p;
         final Color target = Color.WHITE;
         final Color start = new Color(110, 125, 150);
         final long started = System.currentTimeMillis();
-        javax.swing.Timer fade = new javax.swing.Timer(25, null);
-        fade.addActionListener(e -> {
+        // Non-question UI timing goes through the desktop scheduler abstraction.
+        final javax.swing.Timer[] fade = new javax.swing.Timer[1];
+        fade[0] = uiScheduler.repeating(25, () -> {
             double t = Math.min(1.0, (System.currentTimeMillis() - started) / 360.0);
             int r = (int)Math.round(start.getRed() + (target.getRed() - start.getRed()) * t);
             int g = (int)Math.round(start.getGreen() + (target.getGreen() - start.getGreen()) * t);
             int b = (int)Math.round(start.getBlue() + (target.getBlue() - start.getBlue()) * t);
             label.setForeground(new Color(r,g,b));
-            if (t >= 1.0) ((javax.swing.Timer)e.getSource()).stop();
+            if (t >= 1.0 && fade[0] != null) fade[0].stop();
         });
-        fade.setRepeats(true);
-        fade.start();
     }
 
     // ==================== STORY TEXT-TO-SPEECH / KARAOKE ====================
-    private void speakStoryKaraoke(String text, JLabel label) {
+    // Wired through the NarrationPort contract (WindowsNarrationAdapter) with UI callbacks for parity.
+    // Narration process/thread/generation ownership lives in the adapter.
+    public void speakStoryKaraoke(String text, JLabel label) {
         stopStorySpeech();
-        if (!System.getProperty("os.name", "").toLowerCase().contains("win")) {
-            // Keep the on-screen story usable even when Windows text-to-speech
-            // is unavailable.
+        final java.util.List<int[]> ranges = buildStoryRanges(text);
+
+        if (!narrationAdapter.isSupported()) {
             if (label != null) label.setText(wrapStoryHtml(text, label.getWidth() > 500 ? 36 : 23));
             return;
         }
 
-        final int generation = ++storySpeechGeneration;
-        final java.util.List<int[]> ranges = buildStoryRanges(text);
-        activeStoryLabel = label;
-        activeStoryRanges = ranges;
-        activeStoryCurrent = -1;
-
-        // Pause background music while narration plays, then resume it afterward.
-        storyMusicWasPlaying = backgroundMusic != null && backgroundMusic.isRunning();
-        if (storyMusicWasPlaying) backgroundMusic.stop();
-
-        // Use one PowerShell process for the whole story. PowerShell reports the
-        // sentence index immediately before speaking it, so karaoke text follows
-        // the actual speech instead of relying on guessed sentence durations.
-        storySpeechThread = new Thread(() -> {
-            try {
-                StringBuilder speechText = new StringBuilder();
-                for (int i = 0; i < ranges.size(); i++) {
-                    if (i > 0) speechText.append((char)30);
-                    speechText.append(text.substring(ranges.get(i)[0], ranges.get(i)[1]).trim());
-                }
-                String encoded = Base64.getEncoder().encodeToString(
-                        speechText.toString().getBytes(StandardCharsets.UTF_8));
-                String command = "$b=[Convert]::FromBase64String('" + encoded + "');"
-                        + "$t=[Text.Encoding]::UTF8.GetString($b);"
-                        + "$parts=$t.Split([char]30);"
-                        + "Add-Type -AssemblyName System.Speech;"
-                        + "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-                        + "$s.Rate=1;$s.Volume=100;"
-                        + "for($i=0;$i -lt $parts.Length;$i++){"
-                        + "[Console]::Out.WriteLine('LINE:'+$i);"
-                        + "$s.Speak($parts[$i]);"
-                        + "};$s.Dispose();";
-                Process process = new ProcessBuilder("powershell.exe", "-NoProfile",
-                        "-ExecutionPolicy", "Bypass", "-Command", command)
-                        .redirectErrorStream(true).start();
-                storySpeechProcess = process;
-                java.io.BufferedReader reader = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
-                String outputLine;
-                while ((outputLine = reader.readLine()) != null) {
-                    if (generation != storySpeechGeneration || Thread.currentThread().isInterrupted()) {
-                        process.destroy();
-                        break;
-                    }
-                    if (outputLine.startsWith("LINE:")) {
-                        try {
-                            int sentenceIndex = Integer.parseInt(outputLine.substring(5).trim());
-                            showStoryLyric(label, text, sentenceIndex, ranges);
-                        } catch (NumberFormatException ignored) {
-                            // Ignore non-index output from PowerShell.
-                        }
-                    }
-                }
-                process.waitFor();
-            } catch (Exception ignored) {
-                // If narration fails, keep the story screen and navigation usable.
-            } finally {
-                if (generation == storySpeechGeneration) {
-                    activeStoryCurrent = -1;
-                    SwingUtilities.invokeLater(() -> {
-                        if (label != null && generation == storySpeechGeneration) {
-                            label.setText("<html><div style='text-align:center;'>Story complete!</div></html>");
-                        }
-                    });
-                    storySpeechThread = null;
-                    storySpeechProcess = null;
-                    if (storyMusicWasPlaying && musicEnabled && backgroundMusic != null) {
-                        backgroundMusic.start();
-                    }
-                    storyMusicWasPlaying = false;
-                }
+        storyMusicWasPlaying = isBackgroundMusicPlaying();
+        if (storyMusicWasPlaying) audioAdapter.stopMusic();
+        narrationPort.speakStory(text, new NarrationCallback() {
+            @Override public void onLine(int index, String t, java.util.List<int[]> r) {
+                showStoryLyric(label, t, index, r);
             }
-        }, "CodeEscape-Story-Karaoke");
-        storySpeechThread.setDaemon(true);
-        storySpeechThread.start();
+            @Override public void onComplete() {
+                SwingUtilities.invokeLater(() -> {
+                    if (label != null) label.setText("<html><div style='text-align:center;'>Story complete!</div></html>");
+                });
+                if (storyMusicWasPlaying && audioAdapter.isEnabled()) {
+                    audioAdapter.startBackgroundMusic();
+                }
+                storyMusicWasPlaying = false;
+            }
+        });
     }
 
-    private void stopStorySpeech(){
-        storySpeechGeneration++;
-        Process p=storySpeechProcess;
-        storySpeechProcess=null;
-        if(p!=null && p.isAlive()){
-            p.destroy();
-            try{p.waitFor(250,java.util.concurrent.TimeUnit.MILLISECONDS);}catch(InterruptedException ignored){Thread.currentThread().interrupt();}
-        }
-        Thread t=storySpeechThread;
-        storySpeechThread=null;
-        if(t!=null && t!=Thread.currentThread()) t.interrupt();
-
-        if (storyMusicWasPlaying && musicEnabled && backgroundMusic != null && !backgroundMusic.isRunning()) {
-            backgroundMusic.start();
+    public void stopStorySpeech(){
+        narrationPort.stop();
+        if (storyMusicWasPlaying && audioAdapter.isEnabled()) {
+            audioAdapter.startBackgroundMusic();
         }
         storyMusicWasPlaying=false;
-        activeStoryCurrent=-1;
     }
 
-// ==================== INTRO STORY ====================
+    // ==================== STORY SCREENS ====================
 
-private JPanel storyIntroScreen() {
-    String story =
-        "A quake has sealed the ancient Code Dungeon, trapping you beneath a ruined digital kingdom. " +
-        "Your chosen explorer enters the first chamber with only three hearts and a flickering map. " +
-        "Decode the HTML ruins to open the stone gate, cross the CSS shadow maze, and reactivate the JavaScript relics. " +
-        "Then survive the Debugger Bridge, where corrupted traps guard the path to the final vault. " +
-        "The last chamber combines every skill. Solve its challenges, claim the key, and escape before the dungeon resets.";
-
-    return createStoryScreen(
-        "CODE ESCAPE — SYSTEM FAILURE",
-        story,
-        "BEGIN JOURNEY",
-        "castle.png",
-        () -> {
+    private JPanel storyIntroScreen() {
+        StoryContent.StoryPage sp = StoryContent.INTRO;
+        return createStoryScreen(sp.title, sp.body, sp.buttonText, sp.backgroundImage, () -> {
             refreshDashboard();
             refreshProfile();
-            showScreen("CHARACTER");
-        }
-    );
-}
+            flowNavigator.navigate(codeescape.core.flow.FlowState.CHARACTER);
+        });
+    }
 
-// ==================== LEVEL 2 STORY ====================
+    private JPanel storyLevel2Screen() {
+        StoryContent.StoryPage sp = StoryContent.LEVEL2;
+        return createStoryScreen(sp.title, sp.body, sp.buttonText, sp.backgroundImage, () -> runToNextLevel());
+    }
 
-private JPanel storyLevel2Screen() {
-    String story =
-        "The stone gate slams shut behind you as you enter the Shadow Maze. Its walls shift whenever the styling runes are wrong. " +
-        "Use CSS selectors, colors, spacing, and layout properties to light the rune torches and reveal the hidden passage. " +
-        "A wrong move wakes the dungeon traps, so study each clue before advancing.";
+    private JPanel storyLevel3Screen() {
+        StoryContent.StoryPage sp = StoryContent.LEVEL3;
+        return createStoryScreen(sp.title, sp.body, sp.buttonText, sp.backgroundImage, () -> runToNextLevel());
+    }
 
-    return createStoryScreen("LEVEL 2 — THE STYLED MAZE", story, "ENTER LEVEL 2", "level2.png", () -> runToNextLevel());
-}
+    private JPanel storyLevel4Screen() {
+        StoryContent.StoryPage sp = StoryContent.LEVEL4;
+        return createStoryScreen(sp.title, sp.body, sp.buttonText, sp.backgroundImage, () -> runToNextLevel());
+    }
 
-// ==================== LEVEL 3 STORY ====================
-
-private JPanel storyLevel3Screen() {
-    String story =
-        "Beyond the maze lies the Relic Chamber, where ancient machines guard a bridge over a glowing abyss. " +
-        "The mechanisms are frozen until JavaScript variables, operators, conditions, and functions restore their logic. " +
-        "Activate the relics in time and the bridge will rise from the darkness.";
-
-    return createStoryScreen("LEVEL 3 — THE LOGIC CHAMBER", story, "ENTER LEVEL 3", "level3.png", () -> runToNextLevel());
-}
-
-// ==================== LEVEL 4 STORY ====================
-
-private JPanel storyLevel4Screen() {
-    String story =
-        "The bridge leads into the Bugkeeper's Gauntlet. Broken code has become living traps, and every warning is a clue. " +
-        "Find missing tags, misspelled names, and broken syntax to disarm the traps and reach the dungeon's inner door.";
-
-    return createStoryScreen("LEVEL 4 — THE CODE BRIDGE", story, "ENTER LEVEL 4", "level4.png", () -> runToNextLevel());
-}
-
-// ==================== LEVEL 5 STORY ====================
-
-private JPanel storyLevel5Screen() {
-    String story =
-        "At last, you reach the Dragon Vault beneath the dungeon. Its lock is powered by one master program, and every skill must work together. " +
-        "Build the structure with HTML, style it with CSS, activate it with JavaScript, and debug every hidden fault. " +
-        "Complete the challenge, claim the ancient key, and escape with the dungeon treasure.";
-
-    return createStoryScreen("LEVEL 5 — THE FINAL CODE", story, "FACE THE FINAL CODE", "level5.png", () -> runToNextLevel());
-}
+    private JPanel storyLevel5Screen() {
+        StoryContent.StoryPage sp = StoryContent.LEVEL5;
+        return createStoryScreen(sp.title, sp.body, sp.buttonText, sp.backgroundImage, () -> runToNextLevel());
+    }
 
 // ==================== ENDING ====================
 
 private JPanel endingScreen() {
-    BackgroundPanel background = new BackgroundPanel("castle.png");
-    background.setLayout(new BorderLayout());
-    JLabel title = label("THE FINAL TREASURE", 30, GOLD);
-    title.setHorizontalAlignment(SwingConstants.CENTER);
-    title.setBorder(new EmptyBorder(14, 8, 4, 8));
-    background.add(title, BorderLayout.NORTH);
-
-    JLabel instructions = label("YOUR CHARACTER IS RUNNING TOWARD THE ANCIENT VAULT...", 15, GOLD);
-    instructions.setHorizontalAlignment(SwingConstants.CENTER);
-    instructions.setBorder(new EmptyBorder(4, 8, 12, 8));
-    background.add(instructions, BorderLayout.SOUTH);
-
     // Capture the player's exact selection once for this scene. The animation must
     // not resolve its runner and standing pose from mutable UI selection state.
     final String endingCharacter = selectedCharacter;
@@ -1609,10 +1033,17 @@ private JPanel endingScreen() {
     final String endingRunner = runnerOutfitFile(endingCharacter, endingVariant);
     final String endingStanding = characterVariantFile(endingCharacter, endingVariant);
     final String endingVictory = victoryPoseFile(endingCharacter, endingVariant);
-    EndingScene scene = new EndingScene(endingRunner, endingStanding, endingVictory, instructions);
-    background.add(scene, BorderLayout.CENTER);
+    codeescape.desktop.ui.screens.EndingScreen.Result shell =
+            codeescape.desktop.ui.screens.EndingScreen.create(this::load, null, GOLD);
+    codeescape.desktop.ui.animation.EndingScene scene = new codeescape.desktop.ui.animation.EndingScene(
+            this::load, this::loadIsolatedWalkFrames,
+            endingRunner, endingStanding, endingVictory, shell.instructions,
+            this::openTreasureChest,
+            "VICTORY POSE NOT FOUND: " + victoryPoseFile(endingCharacter, endingVariant),
+            GOLD);
+    shell.panel.add(scene, BorderLayout.CENTER);
     SwingUtilities.invokeLater(scene::start);
-    return background;
+    return shell.panel;
 }
 
 /** Maps the eight authored victory poses to the exact gender and color selected by the player. */
@@ -1624,765 +1055,322 @@ private String victoryPoseFile(String character, int variantIndex) {
 }
 
 /** Animated final scene: run, stop, jump, reveal a clickable key, fly to a new vault, open it, and celebrate. */
-private class EndingScene extends JPanel {
-    private static final int KEY_WAITING = 0, KEY_FLYING = 1, OPENING = 2, OPENED = 3;
-    private final BufferedImage runSheet;
-    private final BufferedImage[] endingRunFrames;
-    private final BufferedImage standing;
-    private final BufferedImage victoryPose;
-    private final BufferedImage keyImage;
-    private final JLabel instructions;
-    private final javax.swing.Timer timer;
-    // The selected victory pose is visible immediately when the ending loads.
-    // The key interaction is independent and only controls the vault opening.
-    private int stage = KEY_WAITING;
-    private long stageStarted;
-    private double runnerX = -120;
-    private double keyProgress = 0;
-    private int keyFlightStartX = 0;
-    private int keyFlightStartY = 0;
-    private double lidAngle = 0;
-    private boolean completionShown = false;
-
-    EndingScene(String runFile, String standingFile, String victoryFile, JLabel instructions) {
-        this.runSheet = load(runFile);
-        this.endingRunFrames = loadIsolatedWalkFrames(runFile);
-        this.standing = load(standingFile);
-        this.victoryPose = load(victoryFile);
-        this.keyImage = load("golden_key.png");
-        this.instructions = instructions;
-        setOpaque(false);
-        setPreferredSize(new Dimension(850, 520));
-        addMouseListener(new java.awt.event.MouseAdapter() {
-            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
-                if (stage == KEY_WAITING && keyBounds().contains(e.getPoint())) {
-                    Rectangle key = keyBounds();
-                    keyFlightStartX = key.x;
-                    keyFlightStartY = key.y;
-                    keyProgress = 0;
-                    stage = KEY_FLYING;
-                    stageStarted = System.currentTimeMillis();
-                    instructions.setText("THE KEY IS FLYING TO THE ANCIENT VAULT!");
-                    repaint();
-                }
-            }
-        });
-        timer = new javax.swing.Timer(30, e -> tick());
-    }
-
-    void start() {
-        stageStarted = System.currentTimeMillis();
-        int w = Math.max(1, getWidth());
-        int h = Math.max(1, getHeight());
-        int characterHeight = Math.min((int)(h * .78), 405);
-        int characterWidth = victoryPose == null ? Math.max(58, (int)(characterHeight * .48))
-                : Math.max(90, (int)(characterHeight * victoryPose.getWidth() / (double)victoryPose.getHeight()));
-        runnerX = w / 2.0 - characterWidth / 2.0;
-        instructions.setText("YOUR VICTORY POSE IS READY! CLICK THE KEY TO UNLOCK THE VAULT.");
-        timer.start();
-    }
-
-    private void tick() {
-        long elapsed = System.currentTimeMillis() - stageStarted;
-        int w = Math.max(1, getWidth()), h = Math.max(1, getHeight());
-        double characterWidth = Math.max(58, Math.min((int)(h * .48), 245) * .48);
-        double targetX = w * .50 - characterWidth / 2.0;
-        if (stage == KEY_FLYING) {
-            keyProgress = Math.min(1.0, elapsed / 720.0);
-            if (keyProgress >= 1.0) { stage = OPENING; stageStarted = System.currentTimeMillis(); lidAngle = 0; instructions.setText("THE ANCIENT VAULT IS OPENING..."); }
-        } else if (stage == OPENING) {
-            double openT = Math.min(1.0, elapsed / 760.0);
-            lidAngle = openT * openT * (3.0 - 2.0 * openT);
-            if (lidAngle >= 1.0) {
-                stage = OPENED; timer.stop(); instructions.setText("THE VAULT IS OPEN! TREASURE UNLOCKED.");
-                repaint();
-                if (!completionShown) { completionShown = true; javax.swing.Timer popup = new javax.swing.Timer(550, ev -> openTreasureChest()); popup.setRepeats(false); popup.start(); }
-            }
-        }
-        repaint();
-    }
-
-    private Rectangle keyBounds() {
-        int w = getWidth(), h = getHeight();
-        int kw = Math.max(48, (int)(w * 0.09)), kh = Math.max(30, (int)(h * 0.09));
-        int characterHeight = Math.min((int)(h * .78), 405);
-        int characterWidth = victoryPose == null ? Math.max(58, (int)(characterHeight * .48))
-                : Math.max(90, (int)(characterHeight * victoryPose.getWidth() / (double)victoryPose.getHeight()));
-        int x = w / 2 - kw / 2;
-        int popLift = stage == KEY_WAITING
-                ? (int)(Math.sin(Math.min(1.0, (System.currentTimeMillis() - stageStarted) / 420.0) * Math.PI / 2.0) * Math.min(30, h * 0.07)) : 0;
-        int y = h - characterHeight - 14 - 52 - popLift;
-        return new Rectangle(x, y, kw, kh);
-    }
-
-    private void drawImageFit(Graphics2D g, BufferedImage im, int x, int y, int maxW, int maxH) {
-        if (im == null) return;
-        double scale = Math.min(maxW / (double)im.getWidth(), maxH / (double)im.getHeight());
-        int dw = Math.max(1, (int)(im.getWidth() * scale)), dh = Math.max(1, (int)(im.getHeight() * scale));
-        g.drawImage(im, x, y, dw, dh, null);
-    }
-
-    @Override protected void paintComponent(Graphics graphics) {
-        super.paintComponent(graphics);
-        Graphics2D g = (Graphics2D)graphics.create();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-        int w = getWidth(), h = getHeight();
-        // Draw a detailed illustrated wooden chest, perfectly centered above the character.
-        BufferedImage closedChest = load("treasure_chest_real.png");
-        BufferedImage chestBody = load("treasure_chest_body.png");
-        BufferedImage chestLid = load("treasure_chest_lid.png");
-        int vw = Math.min(Math.max(145, (int)(w * .25)), Math.max(145, w - 56));
-        int vh = closedChest == null ? Math.max(125, (int)(h * .30))
-                : Math.max(125, (int)(vw * closedChest.getHeight() / (double)closedChest.getWidth()));
-        int vx = (w - vw) / 2;
-        int vy = Math.max(8, (int)(h * .035));
-        int lockX = vx + vw / 2;
-        int lockY = vy + (int)(vh * .49);
-        if (stage == OPENING || stage == OPENED) {
-            // Keep the chest compact. The lid opens upward by moving vertically,
-            // rather than spinning around the lock.
-            if (chestBody != null) {
-                g.drawImage(chestBody, vx, vy + (int)(vh * .12), vw, (int)(vh * .88), null);
-            } else if (closedChest != null) {
-                // Draw the lower portion only; do not leave a second closed lid under the animated lid.
-                g.drawImage(closedChest, vx, vy + (int)(vh * .25), vw, (int)(vh * .75), 0,
-                        (int)(closedChest.getHeight() * .25), closedChest.getWidth(), closedChest.getHeight(), null);
-            }
-            int openingY = vy + (int)(vh * .17);
-            int openingH = Math.max(16, (int)(vh * .22));
-            g.setColor(new Color(45, 21, 13, 235));
-            g.fillRoundRect(vx + (int)(vw * .13), openingY, (int)(vw * .74), openingH, 12, 12);
-            if (chestLid != null) {
-                int lidH = Math.max(35, (int)(vh * .42));
-                int lift = (int)(lidAngle * lidH * 0.82);
-                Graphics2D lidGraphics = (Graphics2D) g.create();
-                lidGraphics.rotate(-Math.toRadians(9.0 * lidAngle), vx + vw / 2.0, vy + lidH * 0.78);
-                lidGraphics.drawImage(chestLid, vx, vy - lift, vw, lidH, null);
-                lidGraphics.dispose();
-            }
-            g.setColor(new Color(255, 211, 65, 35 + (int)(90 * lidAngle)));
-            g.fillOval(vx - 12, vy - 8, vw + 24, vh + 36);
-            g.setColor(new Color(255, 231, 125));
-            for (int i = 0; i < 14; i++) {
-                double a = i * Math.PI / 7.0;
-                int sx = lockX + (int)(Math.cos(a) * (25 + lidAngle * 55));
-                int sy = vy + vh / 3 + (int)(Math.sin(a) * (18 + lidAngle * 36));
-                g.fillOval(sx, sy, 5, 5);
-            }
-        } else if (closedChest != null) {
-            g.drawImage(closedChest, vx, vy, vw, vh, null);
-        } else {
-            // Safe fallback if the chest image is missing from a local build.
-            g.setColor(new Color(110, 57, 24));
-            g.fillRoundRect(vx, vy, vw, vh, 18, 18);
-            g.setColor(new Color(238, 178, 51));
-            g.setStroke(new BasicStroke(Math.max(5, vw / 45f)));
-            g.drawRoundRect(vx, vy, vw, vh, 18, 18);
-            g.fillRoundRect(lockX - 15, lockY - 12, 30, 36, 7, 7);
-            g.setColor(new Color(50, 30, 15));
-            g.fillOval(lockX - 4, lockY - 2, 8, 8);
-        }
-        // Display the exact selected victory pose as soon as the ending screen loads.
-        // Do not wait for the key click or chest animation to reveal the pose.
-        int maxVictoryW = Math.max(110, (int)(w * 0.34));
-        int maxVictoryH = Math.max(180, (int)(h * 0.78));
-        // Never show the old standing sprite: only the matching victory pose is valid here.
-        BufferedImage finalCharacter = victoryPose;
-        if (finalCharacter != null) {
-            double victoryScale = Math.min(maxVictoryW / (double)finalCharacter.getWidth(),
-                                           maxVictoryH / (double)finalCharacter.getHeight());
-            int victoryW = Math.max(1, (int)(finalCharacter.getWidth() * victoryScale));
-            int victoryH = Math.max(1, (int)(finalCharacter.getHeight() * victoryScale));
-            int victoryX = (w - victoryW) / 2;
-            int victoryY = h - victoryH - 5;
-            g.drawImage(finalCharacter, victoryX, victoryY, victoryW, victoryH, null);
-            // Gentle celebratory sparkles are present from the moment the pose appears.
-            g.setColor(new Color(255, 226, 125, 225));
-            for (int i = 0; i < 16; i++) {
-                double a = i * Math.PI / 8.0;
-                int sx = w / 2 + (int)(Math.cos(a) * victoryW * 0.62);
-                int sy = victoryY + victoryH / 3 + (int)(Math.sin(a) * victoryH * 0.24);
-                g.fillOval(sx, sy, 5, 5);
-            }
-        } else {
-            g.setColor(new Color(255, 225, 150));
-            g.setFont(new Font("SansSerif", Font.BOLD, 18));
-            String missing = "VICTORY POSE NOT FOUND: " + victoryPoseFile(selectedCharacter, selectedOutfit);
-            FontMetrics fm = g.getFontMetrics();
-            g.drawString(missing, Math.max(12, (w - fm.stringWidth(missing)) / 2), h / 2);
-        }
-        // The key appears above the character and is clickable; then it flies to the vault lock.
-        if (stage == KEY_WAITING || stage == KEY_FLYING) {
-            Rectangle b = keyBounds();
-            int kx=b.x, ky=b.y;
-            if (stage == KEY_FLYING) {
-                double t=keyProgress;
-                double eased=t*t*(3.0-2.0*t);
-                int tx=lockX-18, ty=lockY-12;
-                kx=(int)(keyFlightStartX+(tx-keyFlightStartX)*eased);
-                ky=(int)(keyFlightStartY+(ty-keyFlightStartY)*eased);
-            }
-            if (keyImage != null) drawImageFit(g,keyImage,kx,ky,Math.max(50,(int)(w*.10)),Math.max(34,(int)(h*.10)));
-            else { g.setColor(GOLD); g.setFont(new Font("SansSerif",Font.BOLD,40)); g.drawString("⚿",kx,ky+35); }
-            if (stage == KEY_WAITING) { g.setColor(new Color(255, 220, 90)); g.setStroke(new BasicStroke(2)); g.drawRoundRect(b.x-4,b.y-4,b.width+8,b.height+8,12,12); }
-        }
-        g.dispose();
-    }
-}
-
+// EndingScene animation view migrated to codeescape.desktop.ui.animation.EndingScene
 private void openTreasureChest() {
-    playSpecialMusic("victory.wav");
-    JDialog dialog = new JDialog(this, "Final Treasure", true);
-    dialog.setSize(430, 620);
-    dialog.setLocationRelativeTo(this);
-    dialog.setLayout(new BorderLayout(10, 10));
-    dialog.getContentPane().setBackground(new Color(5, 18, 43));
-
-    JLabel title = label("YOU FOUND THE FINAL TREASURE!", 22, GOLD);
-    title.setHorizontalAlignment(SwingConstants.CENTER);
-    dialog.add(title, BorderLayout.NORTH);
-
-    JPanel notePanel = new JPanel(new BorderLayout());
-    notePanel.setOpaque(false);
-    BufferedImage note = load("treasure_note.png");
-    if (note != null) {
-        JLabel noteImage = new JLabel(new ImageIcon(scale(note, 350, 390)));
-        noteImage.setHorizontalAlignment(SwingConstants.CENTER);
-        notePanel.add(noteImage, BorderLayout.CENTER);
-    }
-    dialog.add(notePanel, BorderLayout.CENTER);
-
-    JButton finish = gold("CONTINUE");
-    finish.setPreferredSize(new Dimension(180, 48));
-    finish.addActionListener(e -> {
-        dialog.dispose();
-        showEndingXpDialog();
-    });
-    JPanel bottom = new JPanel(new FlowLayout(FlowLayout.CENTER));
-    bottom.setOpaque(false);
-    bottom.add(finish);
-    dialog.add(bottom, BorderLayout.SOUTH);
-    dialog.setVisible(true);
+    codeescape.desktop.ui.dialogs.GameDialogs.openTreasureChest(this, this::load, img -> scale(img, 350, 390),
+            t -> label(t, 22, GOLD), this::gold, GOLD,
+            () -> playSpecialMusic(codeescape.core.content.AudioCatalog.TRACK_VICTORY), this::showEndingXpDialog);
 }
 
     private void showEndingXpDialog() {
-        JDialog result = new JDialog(this, "ATTEMPT RESULTS", true);
-        result.setSize(390, 270);
-        result.setLocationRelativeTo(this);
-        result.setResizable(false);
-        JPanel box = new JPanel();
-        box.setBackground(new Color(5, 18, 43));
-        box.setBorder(new EmptyBorder(22, 24, 22, 24));
-        box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
-        JLabel heading = label("LEVELS COMPLETED!", 24, GOLD);
-        heading.setAlignmentX(Component.CENTER_ALIGNMENT);
-        JLabel earned = label("XP collected this login: " + savedXp, 18, CREAM);
-        earned.setAlignmentX(Component.CENTER_ALIGNMENT);
-        box.add(heading);
-        box.add(Box.createVerticalStrut(14));
-        box.add(earned);
-        box.add(Box.createVerticalStrut(24));
-        JPanel actions = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 0));
-        actions.setOpaque(false);
-        JButton menu = gold("MENU");
-        menu.addActionListener(e -> {
-            result.dispose();
-            refreshDashboard();
-            refreshMainMenuXp();
-            showScreen("DASHBOARD");
-        });
-        JButton retry = smallBlue("TRY AGAIN");
-        retry.addActionListener(e -> {
-            result.dispose();
-            startNewLesson();
-        });
-        actions.add(menu);
-        actions.add(retry);
-        box.add(actions);
-        result.setContentPane(box);
-        result.setVisible(true);
+        codeescape.desktop.ui.dialogs.GameDialogs.showEndingXpDialog(this, savedXp,
+                t -> label(t, 24, GOLD), this::gold, this::smallBlue, GOLD, CREAM,
+                () -> { refreshDashboard(); refreshMainMenuXp(); showScreen("DASHBOARD"); },
+                this::startNewLesson);
     }
 
     // ==================== QUESTION ====================
-   private JPanel questionScreen(){
-    questionBackground=new BackgroundPanel("level1.png"); questionBackground.setLayout(new BorderLayout()); questionBackground.add(hud(),BorderLayout.NORTH); JPanel center=new JPanel(new GridBagLayout()); center.setOpaque(false);
-    JPanel card=panel(350,540); card.setLayout(new BoxLayout(card,BoxLayout.Y_AXIS)); card.setBorder(BorderFactory.createCompoundBorder(new RoundedBorder(new Color(111,196,255,220),2,22),new EmptyBorder(14,12,18,12)));
-    questionCounterLabel=label("LEVEL 1 • QUESTION 1 / 10",21,GOLD); questionCounterLabel.setAlignmentX(Component.CENTER_ALIGNMENT); questionCounterLabel.setHorizontalAlignment(SwingConstants.CENTER);
-    questionLabel=new JLabel(); questionLabel.setFont(new Font("SansSerif",Font.BOLD,20)); questionLabel.setForeground(CREAM); questionLabel.setHorizontalAlignment(SwingConstants.CENTER); questionLabel.setVerticalAlignment(SwingConstants.CENTER);
-    JPanel questionHolder=new JPanel(new BorderLayout()); questionHolder.setOpaque(false); questionHolder.setPreferredSize(new Dimension(320,150)); questionHolder.setMinimumSize(new Dimension(280,120)); questionHolder.setMaximumSize(new Dimension(340,180)); questionHolder.add(questionLabel,BorderLayout.CENTER);
-    answerGrid=new JPanel(new GridLayout(2,2,8,8)); answerGrid.setOpaque(false); answerGrid.setBorder(new EmptyBorder(12,6,8,6)); answerGrid.setPreferredSize(new Dimension(320,190)); answerGrid.setMaximumSize(new Dimension(340,210));
-    for(int i=0;i<4;i++){final int choice=i; answerButtons[i]=answerButton(""); answerButtons[i].addActionListener(e->answer(choice)); answerGrid.add(answerButtons[i]);}
-    syntaxPanel=new JPanel(); syntaxPanel.setOpaque(false); syntaxPanel.setLayout(new BoxLayout(syntaxPanel,BoxLayout.Y_AXIS)); JLabel sh=label("Type the missing syntax below:",14,CYAN); sh.setAlignmentX(Component.CENTER_ALIGNMENT); syntaxAnswerField=textField("Complete the syntax here"); syntaxAnswerField.setMaximumSize(new Dimension(320,48)); syntaxSubmitButton=gold("SUBMIT ANSWER"); syntaxSubmitButton.setAlignmentX(Component.CENTER_ALIGNMENT); syntaxSubmitButton.addActionListener(e->answerSyntax()); syntaxAnswerField.addActionListener(e->answerSyntax()); syntaxPanel.add(sh); syntaxPanel.add(Box.createVerticalStrut(10)); syntaxPanel.add(syntaxAnswerField); syntaxPanel.add(Box.createVerticalStrut(12)); syntaxPanel.add(syntaxSubmitButton);
-    card.add(Box.createVerticalStrut(12)); card.add(questionCounterLabel); card.add(Box.createVerticalStrut(20)); card.add(questionHolder); card.add(Box.createVerticalStrut(10)); card.add(answerGrid); card.add(syntaxPanel); card.add(Box.createVerticalGlue()); center.add(card); questionBackground.add(center,BorderLayout.CENTER); return questionBackground;
-}
-
-    private JPanel hud() {
-        JPanel h = new JPanel(new BorderLayout());
-        h.setBackground(new Color(19, 53, 88, 245));
-        h.setBorder(new EmptyBorder(8, 12, 8, 12));
-
-        JPanel stats = new JPanel(new GridLayout(1, 3));
-        stats.setOpaque(false);
-        heartsLabel = label(heartsText(), 24, RED);
-        heartsLabel.setHorizontalAlignment(SwingConstants.CENTER);
-        timerLabel = label("⏱ 15s", 24, GOLD);
-        timerLabel.setHorizontalAlignment(SwingConstants.CENTER);
-        xpLabel = label("⭐ XP: " + xp, 24, GOLD);
-        xpLabel.setHorizontalAlignment(SwingConstants.CENTER);
-        stats.add(heartsLabel);
-        stats.add(timerLabel);
-        stats.add(xpLabel);
-
-        JButton exit = circularExitButton();
-        exit.addActionListener(e -> showGameExitDialog());
-
-        h.add(stats, BorderLayout.CENTER);
-        h.add(exit, BorderLayout.EAST);
-        return h;
+    private JPanel questionScreen() {
+        codeescape.desktop.ui.screens.QuestionScreen.Refs refs = codeescape.desktop.ui.screens.QuestionScreen.create(
+                new codeescape.desktop.ui.screens.QuestionScreen.Ui() {
+                    @Override public JPanel panel(int w, int h) { return CodeEscapeApp.this.panel(w, h); }
+                    @Override public JLabel label(String text, int size, Color c) { return CodeEscapeApp.this.label(text, size, c); }
+                    @Override public JButton answerButton(String text) { return CodeEscapeApp.this.answerButton(text); }
+                    @Override public JTextField textField(String tip) { return CodeEscapeApp.this.textField(tip); }
+                    @Override public JButton gold(String text) { return CodeEscapeApp.this.gold(text); }
+                    @Override public JButton base(String text) { return CodeEscapeApp.this.base(text); }
+                    @Override public Color gold() { return GOLD; }
+                    @Override public Color cream() { return CREAM; }
+                    @Override public Color cyan() { return CYAN; }
+                    @Override public Color red() { return RED; }
+                    @Override public java.util.function.Function<String, java.awt.image.BufferedImage> loader() { return CodeEscapeApp.this::load; }
+                    @Override public String heartsText() { return CodeEscapeApp.this.heartsText(); }
+                    @Override public int xp() { return CodeEscapeApp.this.session().xp; }
+                    @Override public int secondsLeft() { return secondsLeft; }
+                },
+                this::answer, this::answerSyntax, this::showGameExitDialog);
+        questionBackground = refs.questionBackground;
+        questionCounterLabel = refs.questionCounterLabel;
+        questionLabel = refs.questionLabel;
+        answerGrid = refs.answerGrid;
+        answerButtons = refs.answerButtons;
+        syntaxPanel = refs.syntaxPanel;
+        syntaxAnswerField = refs.syntaxAnswerField;
+        syntaxSubmitButton = refs.syntaxSubmitButton;
+        heartsLabel = refs.hud.heartsLabel;
+        timerLabel = refs.hud.timerLabel;
+        xpLabel = refs.hud.xpLabel;
+        questionHudRefs = refs.hud;
+        questionScreenRefs = refs;
+        questionHudController = new codeescape.desktop.ui.question.QuestionHudController(questionHudRefs, this::handleTimeout);
+        questionHudController.setAcceptingAnswer(acceptingAnswer);
+        questionHudController.setSecondsLeft(secondsLeft);
+        return questionBackground;
     }
 
-    private JButton circularExitButton() {
-        JButton b = base("EXIT");
-        b.setPreferredSize(new Dimension(105, 42));
-        b.setMinimumSize(new Dimension(105, 42));
-        b.setMaximumSize(new Dimension(105, 42));
-        b.setFont(new Font("SansSerif", Font.BOLD, 17));
-        b.setForeground(Color.WHITE);
-        b.setBackground(new Color(120, 28, 45));
-        b.setFocusPainted(false);
-        b.setOpaque(true);
-        b.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(RED, 2),
-            new EmptyBorder(6, 18, 6, 18)
-        ));
-        b.setToolTipText("Exit");
-        b.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        return b;
+    private void stopQuestionTimer() {
+        if (questionHudController != null) questionHudController.stop();
+        if (questionTimer != null) questionTimer.stop();
+    }
+    /** Central accepting-answer state: keeps the HUD controller and legacy field in sync. */
+    private void setAcceptingAnswer(boolean value) {
+        acceptingAnswer = value;
+        if (questionHudController != null) questionHudController.setAcceptingAnswer(value);
+    }
+
+    /** Central countdown state: keeps the HUD controller and legacy field in sync. */
+    private void setSecondsLeft(int value) {
+        secondsLeft = value;
+        if (questionHudController != null) questionHudController.setSecondsLeft(value);
+    }
+
+    /** Current countdown value, preferring the HUD controller when it owns the timer. */
+    private int currentSecondsLeft() {
+        return questionHudController != null ? questionHudController.getSecondsLeft() : secondsLeft;
+    }
+
+    /** Enables/disables all question inputs through the extracted screen helper. */
+    private void setAnswerInputsEnabled(boolean enabled) {
+        codeescape.desktop.ui.screens.QuestionScreen.setAnswerInputsEnabled(questionScreenRefs, enabled);
     }
 
     private void showGameExitDialog() {
-        if (questionTimer != null) questionTimer.stop();
-        acceptingAnswer = false;
-
-        final JDialog dialog = new JDialog(this, "EXIT GAME", true);
-        dialog.setUndecorated(true);
-        dialog.setSize(360, 230);
-        dialog.setLocationRelativeTo(this);
-        dialog.setResizable(false);
-
-        JPanel box = new JPanel();
-        box.setBackground(new Color(5, 28, 67, 250));
-        box.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(GOLD, 3),
-            new EmptyBorder(22, 25, 22, 25)
-        ));
-        box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
-
-        JLabel title = label("EXIT GAME?", 28, GOLD);
-        title.setAlignmentX(Component.CENTER_ALIGNMENT);
-        box.add(title);
-        box.add(Box.createVerticalStrut(10));
-
-        JLabel msg = label("Your unfinished run will not be saved.", 15, CREAM);
-        msg.setAlignmentX(Component.CENTER_ALIGNMENT);
-        box.add(msg);
-        box.add(Box.createVerticalStrut(20));
-
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 0));
-        buttons.setOpaque(false);
-
-        JButton continueButton = gold("CONTINUE GAME");
-        continueButton.setPreferredSize(new Dimension(150, 45));
-        continueButton.addActionListener(e -> {
-            dialog.dispose();
-            acceptingAnswer = true;
-            if (secondsLeft > 0) restartTimerWithRemainingTime();
-        });
-
-        JButton exitButton = base("EXIT GAME");
-        exitButton.setPreferredSize(new Dimension(130, 45));
-        exitButton.setBackground(new Color(120, 28, 45));
-        exitButton.setForeground(Color.BLACK);
-        exitButton.setBorder(BorderFactory.createLineBorder(RED, 2));
-        exitButton.addActionListener(e -> {
-            dialog.dispose();
-            cancelUnfinishedAttempt();
-            showScreen("DASHBOARD");
-        });
-
-        buttons.add(continueButton);
-        buttons.add(exitButton);
-        box.add(buttons);
-
-        dialog.setContentPane(box);
-        dialog.setVisible(true);
+        stopQuestionTimer();
+        setAcceptingAnswer(false);
+        codeescape.desktop.ui.dialogs.GameDialogs.showGameExitDialog(this, GOLD, CREAM, RED,
+                t -> label(t, 28, GOLD),
+                this::gold,
+                this::base,
+                () -> currentSecondsLeft(),
+                () -> { setAcceptingAnswer(true); if (currentSecondsLeft() > 0) restartTimerWithRemainingTime(); },
+                () -> { cancelUnfinishedAttempt(); goDashboard(); }
+        );
     }
 
     private void cancelUnfinishedAttempt() {
-        if (questionTimer != null) questionTimer.stop();
-        if (runningTimer != null) runningTimer.stop();
+        stopQuestionTimer();
         stopStorySpeech();
-        acceptingAnswer = false;
-        xp = 0;
-        showZeroXpAfterCancelledRun = true;
-        correctAnswers = 0;
-        hearts = 3;
-        level = 1;
-        questionIndex = 0;
-        secondsLeft = 15;
+        setAcceptingAnswer(false);
+        lessonEngine.cancelRun(savedXp);
+        setSecondsLeft(GameConfig.MCQ_SECONDS);
         refreshDashboard();
     }
 
     private String heartsText() {
-        return (hearts >= 1 ? "♥" : "♡") + " " + (hearts >= 2 ? "♥" : "♡") + " " + (hearts >= 3 ? "♥" : "♡");
+        return (session().hearts >= 1 ? "♥" : "♡") + " " + (session().hearts >= 2 ? "♥" : "♡") + " " + (session().hearts >= 3 ? "♥" : "♡");
     }
 
     private void restartTimerWithRemainingTime() {
-        if (questionTimer != null) questionTimer.stop();
-        timerLabel.setText("⏱ " + secondsLeft + "s");
-        timerLabel.setForeground(secondsLeft <= 5 ? RED : GOLD);
-        questionTimer = new javax.swing.Timer(1000, e -> {
-            if (!acceptingAnswer) return;
-            secondsLeft--;
-            timerLabel.setText("⏱ " + secondsLeft + "s");
-            timerLabel.setForeground(secondsLeft <= 5 ? RED : GOLD);
-            if (secondsLeft <= 0) { questionTimer.stop(); handleTimeout(); }
-        });
-        questionTimer.start();
+        stopQuestionTimer();
+        if (questionHudController != null) {
+            questionHudController.setAcceptingAnswer(acceptingAnswer);
+            questionHudController.restart(currentSecondsLeft(), GameConfig.QUESTION_TICK_MS,
+                    this::syncQuestionTimerUiFromController,
+                    () -> { syncQuestionTimerUiFromController(); handleTimeout(); });
+            questionTimer = null;
+            return;
+        }
+        startLegacyQuestionTimer();
     }
 
     private void startQuestion() {
-        level = Math.max(1, Math.min(5, level));
-        questionIndex = Math.max(0, Math.min(9, questionIndex));
-        questionBackground.setBackgroundImage("level" + level + ".png");
+        session().level = Math.max(1, Math.min(GameConfig.LEVEL_COUNT, session().level));
+        session().questionIndex = Math.max(0, Math.min(GameConfig.QUESTIONS_PER_LEVEL - 1, session().questionIndex));
+        questionBackground.setBackgroundImage(LevelMetadata.of(session().level).backgroundImage);
         questionBackground.revalidate(); questionBackground.repaint();
         showScreen("QUESTION");
         loadQuestion();
     }
 
     private void loadQuestion() {
-        Question[][] activeQuestions = (sessionQuestions != null && sessionQuestions.length == questions.length)
-                ? sessionQuestions : questions;
-        Question q = activeQuestions[level - 1][questionIndex];
-        acceptingAnswer = true;
-        secondsLeft = q.syntax ? 30 : 15;
-        questionCounterLabel.setText("LEVEL " + level + " • QUESTION " + (questionIndex + 1) + " / 10");
-        questionLabel.setText(
-            "<html><center>" + q.text + "</center></html>"
-         );
-         questionLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-         questionLabel.setHorizontalAlignment(SwingConstants.CENTER);
-        questionLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        Question q = lessonEngine.currentQuestion();
+        session().level = lessonEngine.getLevel();
+        session().questionIndex = lessonEngine.getQuestionIndex();
+        setAcceptingAnswer(true);
+        setSecondsLeft(lessonEngine.questionTimeSeconds());
         boolean syntax = q.syntax;
-        answerGrid.setVisible(!syntax); syntaxPanel.setVisible(syntax);
-        if(syntax){syntaxAnswerField.setText("");syntaxAnswerField.setEnabled(true);syntaxSubmitButton.setEnabled(true);} else {for(int i=0;i<4;i++){answerButtons[i].setText(q.answers[i]);answerButtons[i].setEnabled(true);}}
-        questionBackground.revalidate(); questionBackground.repaint();
+        String counter = "LEVEL " + session().level + " • QUESTION " + (session().questionIndex + 1) + " / " + GameConfig.QUESTIONS_PER_LEVEL;
+        String questionHtml = "<html><center>" + q.text + "</center></html>";
+        codeescape.desktop.ui.screens.QuestionScreen.Refs refs = questionScreenRefs;
+        if (refs == null) {
+            // Defensive fallback: rebuild refs from legacy fields (pre-extraction parity path).
+            refs = new codeescape.desktop.ui.screens.QuestionScreen.Refs();
+            refs.questionBackground = questionBackground;
+            refs.questionCounterLabel = questionCounterLabel;
+            refs.questionLabel = questionLabel;
+            refs.answerGrid = answerGrid;
+            refs.answerButtons = answerButtons;
+            refs.syntaxPanel = syntaxPanel;
+            refs.syntaxAnswerField = syntaxAnswerField;
+            refs.syntaxSubmitButton = syntaxSubmitButton;
+            refs.hud = questionHudRefs;
+        }
+        codeescape.desktop.ui.screens.QuestionScreen.renderQuestion(refs, counter, questionHtml, syntax, q.answers, null);
+
         updateHud();
         restartTimer();
     }
 
     private void restartTimer() {
-        if (questionTimer != null) questionTimer.stop();
-        Question[][] activeQuestions = (sessionQuestions != null && sessionQuestions.length == questions.length)
-                ? sessionQuestions : questions;
-        Question current = activeQuestions[level - 1][questionIndex];
-        secondsLeft = current.syntax ? 30 : 15;
-        timerLabel.setText("⏱ " + secondsLeft + "s");
-        timerLabel.setForeground(GOLD);
-        questionTimer = new javax.swing.Timer(1000, e -> {
+        stopQuestionTimer();
+        int startSeconds = lessonEngine.questionTimeSeconds();
+        setSecondsLeft(startSeconds);
+        if (questionHudController != null) {
+            questionHudController.setAcceptingAnswer(acceptingAnswer);
+            questionHudController.restart(startSeconds, GameConfig.QUESTION_TICK_MS,
+                    this::syncQuestionTimerUiFromController,
+                    () -> { syncQuestionTimerUiFromController(); handleTimeout(); });
+            questionTimer = null;
+            return;
+        }
+        startLegacyQuestionTimer();
+    }
+
+    /** Legacy fallback timer loop retained for parity when the HUD controller is unavailable. */
+    private void startLegacyQuestionTimer() {
+        if (timerLabel == null) return;
+        timerLabel.setText(timerLabelText());
+        timerLabel.setForeground(secondsLeft <= 5 ? RED : GOLD);
+        questionTimer = uiScheduler.repeating(GameConfig.QUESTION_TICK_MS, () -> {
             if (!acceptingAnswer) return;
             secondsLeft--;
-            timerLabel.setText("⏱ " + secondsLeft + "s");
+            if (questionHudController != null) questionHudController.setSecondsLeft(secondsLeft);
+            timerLabel.setText(timerLabelText());
             timerLabel.setForeground(secondsLeft <= 5 ? RED : GOLD);
-            if (secondsLeft <= 0) { questionTimer.stop(); handleTimeout(); }
+            if (secondsLeft <= 0) { stopQuestionTimer(); handleTimeout(); }
         });
         questionTimer.start();
     }
 
-    private void answer(int choice) {
-        if (!acceptingAnswer) return;
-        acceptingAnswer = false;
-        if (questionTimer != null) questionTimer.stop();
-        for (JButton b : answerButtons) b.setEnabled(false);
-        Question[][] activeQuestions = (sessionQuestions != null && sessionQuestions.length == questions.length)
-                ? sessionQuestions : questions;
-        Question q = activeQuestions[level - 1][questionIndex];
-        if (choice == q.correct) {
-            xp += 10;
-            correctAnswers++;
-            updateHud();
-            refreshDashboard();
-            showGamePopup("CORRECT!", "+10 XP", "Great Job! You got the Correct Answer", GREEN);
-            afterCorrect();
-        } else {
-            hearts--;
-            updateHud();
-            refreshDashboard();
-            showGamePopup("NOT QUITE!", "-1 HEART", "Try again! You must perfect this question before moving to the next one.", RED);
-            afterWrong();
+    private void syncQuestionTimerUiFromController() {
+        if (questionHudController != null) secondsLeft = questionHudController.getSecondsLeft();
+        if (timerLabel != null) {
+            timerLabel.setText(timerLabelText());
+            timerLabel.setForeground(secondsLeft <= 5 ? RED : GOLD);
         }
     }
 
-    private void answerSyntax(){
-        if(!acceptingAnswer)return; acceptingAnswer=false; if(questionTimer!=null)questionTimer.stop(); syntaxSubmitButton.setEnabled(false); syntaxAnswerField.setEnabled(false);
-        Question[][] active=(sessionQuestions!=null&&sessionQuestions.length==questions.length)?sessionQuestions:questions; Question q=active[level-1][questionIndex]; String typed=syntaxAnswerField.getText().trim().replaceAll("\\s+"," "); String expected=q.expected.trim().replaceAll("\\s+"," ");
-        if(typed.equalsIgnoreCase(expected)){xp+=10;correctAnswers++;updateHud();refreshDashboard();showGamePopup("CORRECT!","+10 XP","Great Job! You completed the syntax!",GREEN);afterCorrect();}
-        else{hearts--;updateHud();refreshDashboard();showGamePopup("NOT QUITE!","-1 HEART","Check the syntax and try again.",RED);afterWrong();}
+    /** Formats the countdown label; prefix is the original legacy string preserved byte-for-byte. */
+    private String timerLabelText() { return "⏱ " + secondsLeft + "s"; }
+
+    private void handleAnswerResult(codeescape.core.engine.LessonEngine.AnswerResult result, String heading, String big, String detail, Color accent, boolean feedbackCorrect) {
+        updateHud();
+        refreshDashboard();
+        playFeedbackSound(feedbackCorrect);
+        showGamePopup(heading, big, detail, accent);
+        if (codeescape.core.flow.FlowTransitions.shouldCommitSession(result)) {
+            commitSessionXp();
+        }
+        codeescape.core.flow.FlowState next = codeescape.core.flow.FlowTransitions.nextAfterAnswer(result, session().level);
+        if (next == codeescape.core.flow.FlowState.QUESTION) {
+            loadQuestion();
+        } else {
+            flowNavigator.navigate(next, session().level);
+        }
+    }
+
+    private void answer(int choice) {
+        if (!acceptingAnswer) return;
+        setAcceptingAnswer(false);
+        stopQuestionTimer();
+        setAnswerInputsEnabled(false);
+        codeescape.core.engine.LessonEngine.AnswerResult result = lessonEngine.submitChoice(choice);
+        if (result == codeescape.core.engine.LessonEngine.AnswerResult.CORRECT || result == codeescape.core.engine.LessonEngine.AnswerResult.LEVEL_COMPLETE || result == codeescape.core.engine.LessonEngine.AnswerResult.GAME_COMPLETE) {
+            handleAnswerResult(result, "CORRECT!", "+10 XP", "Great Job! You got the Correct Answer", GREEN, true);
+        } else {
+            handleAnswerResult(result, "NOT QUITE!", "-1 HEART", "Try again! You must perfect this question before moving to the next one.", RED, false);
+        }
+    }
+
+    private void answerSyntax() {
+        if (!acceptingAnswer) return;
+        setAcceptingAnswer(false);
+        stopQuestionTimer();
+        setAnswerInputsEnabled(false);
+        String typed = syntaxAnswerField == null ? "" : syntaxAnswerField.getText().trim().replaceAll("\\s+", " ");
+        codeescape.core.engine.LessonEngine.AnswerResult result = lessonEngine.submitSyntax(typed);
+        if (result == codeescape.core.engine.LessonEngine.AnswerResult.CORRECT || result == codeescape.core.engine.LessonEngine.AnswerResult.LEVEL_COMPLETE || result == codeescape.core.engine.LessonEngine.AnswerResult.GAME_COMPLETE) {
+            handleAnswerResult(result, "CORRECT!", "+10 XP", "Great Job! You completed the syntax!", GREEN, true);
+        } else {
+            handleAnswerResult(result, "NOT QUITE!", "-1 HEART", "Check the syntax and try again.", RED, false);
+        }
     }
 
     private void handleTimeout() {
         if (!acceptingAnswer) return;
-        acceptingAnswer = false;
-        for (JButton b : answerButtons) b.setEnabled(false);
-        hearts--;
-        updateHud();
-        refreshDashboard();
-        showGamePopup("TIME'S UP!", "-1 HEART", "Time Ran Out. Try the same question again.", RED);
-        afterWrong();
-    }
-
-    private void afterCorrect() {
-        playFeedbackSound(true);
-    questionIndex++;
-
-    if (questionIndex >= 10) {
-
-        // Finished Level 5
-        if (level >= 5) {
-            commitSessionXp();
-            showScreen("ENDING");
-            return;
-        }
-
-        // Move to the next level
-        level++;
-        questionIndex = 0;
-
-        // Show the story before entering the next level
-        switch (level) {
-            case 2:
-                showScreen("STORY_LEVEL2");
-                break;
-
-            case 3:
-                showScreen("STORY_LEVEL3");
-                break;
-
-            case 4:
-                showScreen("STORY_LEVEL4");
-                break;
-
-            case 5:
-                showScreen("STORY_LEVEL5");
-                break;
-        }
-
-    } else {
-        loadQuestion();
-    }
-}
-
-    private void afterWrong() {
-        playFeedbackSound(false);
-        if (hearts <= 0) {
-            // Running out of hearts is a completed attempt and DOES save the XP
-            // earned during that attempt. Only the explicit Exit action discards it.
-            commitSessionXp();
-            updateHud();
-            refreshDashboard();
-            showScreen("GAMEOVER");
-            return;
-        }
-        loadQuestion();
+        setAcceptingAnswer(false);
+        setAnswerInputsEnabled(false);
+        codeescape.core.engine.LessonEngine.AnswerResult result = lessonEngine.timeout();
+        handleAnswerResult(result, "TIME'S UP!", "-1 HEART", "Time Ran Out. Try the same question again.", RED, false);
     }
 
     private void updateHud() {
-        if (heartsLabel != null) heartsLabel.setText(heartsText());
-        if (xpLabel != null) xpLabel.setText("⭐ XP: " + xp);
-        if (dashboardXpLabel != null) dashboardXpLabel.setText("★  XP: " + (showZeroXpAfterCancelledRun ? 0 : savedXp));
-        if (timerLabel != null) timerLabel.setText("⏱ " + secondsLeft + "s");
+        String hearts = heartsText();
+        String xpText = "⭐ XP: " + session().xp;
+        String timerText = timerLabelText();
+        if (questionHudController != null && questionHudRefs != null) {
+            questionHudController.applyHud(hearts, xpText, timerText, timerLabel != null ? timerLabel.getForeground() : null);
+        } else {
+            if (heartsLabel != null) heartsLabel.setText(hearts);
+            if (xpLabel != null) xpLabel.setText(xpText);
+            if (timerLabel != null) timerLabel.setText(timerText);
+        }
+        if (dashboardXpLabel != null) dashboardXpLabel.setText("★  XP: " + (session().showZeroXpAfterCancelledRun ? 0 : savedXp));
     }
+
 
     // ==================== RUNNING ====================
     private void runToNextLevel() {
-        if (questionTimer != null) questionTimer.stop();
-        if (runningTimer != null) runningTimer.stop();
-
-        BackgroundPanel p = new BackgroundPanel("level" + level + ".png");
-        p.setLayout(new BorderLayout(0, 12));
-        p.setBorder(new EmptyBorder(16, 20, 18, 20));
-
-        GlassPanel header = new GlassPanel(new Color(10, 25, 48, 210));
-        header.setLayout(new BorderLayout(14, 0));
-        header.setBorder(new EmptyBorder(14, 20, 14, 20));
-        JLabel title = label("CODE ESCAPE  /  LEVEL " + level, 23, CYAN);
-        title.setFont(new Font("SansSerif", Font.BOLD, 23));
-        JLabel subtitle = label("NEXT AREA UNLOCKING", 12, new Color(210, 225, 245));
-        subtitle.setFont(new Font("SansSerif", Font.BOLD, 12));
-        JPanel titleStack = new JPanel();
-        titleStack.setOpaque(false);
-        titleStack.setLayout(new BoxLayout(titleStack, BoxLayout.Y_AXIS));
-        titleStack.add(title);
-        titleStack.add(Box.createVerticalStrut(4));
-        titleStack.add(subtitle);
-        header.add(titleStack, BorderLayout.WEST);
-        JLabel levelBadge = label(String.format("%02d  /  05", level), 18, GOLD);
-        levelBadge.setFont(new Font("SansSerif", Font.BOLD, 18));
-        levelBadge.setHorizontalAlignment(SwingConstants.CENTER);
-        header.add(levelBadge, BorderLayout.EAST);
-        p.add(header, BorderLayout.NORTH);
+        stopQuestionTimer();
 
         String runnerFile = runnerOutfitFile(selectedCharacter, selectedOutfit);
-        playLevelMusic(level);
-        MovingRunner runner = new MovingRunner(runnerFile);
-        p.add(runner, BorderLayout.CENTER);
+        playLevelMusic(session().level);
+        codeescape.desktop.ui.animation.MovingRunner runner = new codeescape.desktop.ui.animation.MovingRunner(this::load, runnerFile);
+        codeescape.desktop.ui.screens.RunningTransitionScreen.Result tr =
+                codeescape.desktop.ui.screens.RunningTransitionScreen.create(
+                        session().level, LevelMetadata.of(session().level).backgroundImage, this::load, runner, CYAN, CREAM, GOLD);
+        runner.progressBar = tr.progressBar;
 
-        GlassPanel footer = new GlassPanel(new Color(10, 25, 48, 218));
-        footer.setLayout(new BorderLayout(14, 8));
-        footer.setBorder(new EmptyBorder(13, 20, 13, 20));
-        JLabel destination = label("RUNNING TO THE NEXT LEVEL", 15, CREAM);
-        destination.setFont(new Font("SansSerif", Font.BOLD, 15));
-        footer.add(destination, BorderLayout.WEST);
-        JLabel hint = label("KEEP GOING  •  YOU'RE DOING GREAT", 11, CYAN);
-        hint.setFont(new Font("SansSerif", Font.BOLD, 11));
-        hint.setHorizontalAlignment(SwingConstants.RIGHT);
-        footer.add(hint, BorderLayout.EAST);
-        JProgressBar progress = new JProgressBar(0, 100);
-        progress.setValue(0);
-        progress.setBorderPainted(false);
-        progress.setStringPainted(false);
-        progress.setOpaque(false);
-        progress.setForeground(CYAN);
-        progress.setBackground(new Color(255, 255, 255, 45));
-        progress.setPreferredSize(new Dimension(200, 8));
-        progress.setUI(new javax.swing.plaf.basic.BasicProgressBarUI() {
-            @Override protected void paintDeterminate(Graphics g, JComponent c) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                int w = c.getWidth(), h = c.getHeight();
-                g2.setColor(new Color(255, 255, 255, 48));
-                g2.fillRoundRect(0, 0, w, h, h, h);
-                int fill = (int) Math.round(w * progress.getPercentComplete());
-                g2.setPaint(new GradientPaint(0, 0, new Color(90, 245, 230), w, h, new Color(63, 151, 255)));
-                if (fill > 0) g2.fillRoundRect(0, 0, fill, h, h, h);
-                g2.dispose();
-            }
-        });
-        footer.add(progress, BorderLayout.SOUTH);
-        p.add(footer, BorderLayout.SOUTH);
-        runner.progressBar = progress;
-
-        root.add(p, "RUNNING");
+        root.add(tr.panel, "RUNNING");
         showScreen("RUNNING");
-        runner.onFinished = () -> {
-            if (runningTimer != null) runningTimer.stop();
-            startQuestion();
-        };
+        // Question lifecycle entry decided by the core flow contract.
+        runner.onFinished = () -> dispatch(codeescape.core.flow.FlowEvent.of(codeescape.core.flow.FlowEvent.Type.LESSON_STARTED));
     }
 
     // ==================== PROFILE ====================
-   private JPanel profileScreen() {
-    BackgroundPanel p = new BackgroundPanel("level5.png");
-    p.setLayout(new BorderLayout());
-
-    JPanel top = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 8));
-    top.setBackground(new Color(19, 53, 88, 245));
-
-    JButton home = navButton("HOME");
-    JButton play = navButton("PLAY");
-    JButton profile = navButton("PROFILE");
-
-    home.addActionListener(e -> {
-        if (questionTimer != null) questionTimer.stop();
-        acceptingAnswer = false;
-        refreshDashboard();
-        showScreen("DASHBOARD");
-    });
-    play.addActionListener(e -> startNewLesson());
-    profile.setEnabled(false);
-
-    top.add(home);
-    top.add(play);
-    top.add(profile);
-
-    p.add(top, BorderLayout.NORTH);
-
-    JPanel center = new JPanel(new GridBagLayout());
-    center.setOpaque(false);
-
-    JPanel box = panel(350, 560);
-    box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
-
-    title(box, "PROFILE");
-
-    // Character
-    profileAvatar = image(
-    outfitFile(selectedCharacter, selectedOutfit),
-    145,
-    210
-    );
-    profileAvatar.setAlignmentX(Component.CENTER_ALIGNMENT);
-    box.add(profileAvatar);
-
-    // Player name
-    profilePlayerLabel = label(
-        "Player: " + (username.isEmpty() ? "Guest" : username),
-        20,
-        CREAM
-    );
-    profilePlayerLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-    box.add(Box.createVerticalStrut(6));
-    box.add(profilePlayerLabel);
-
-    // Character name
-    profileCharacterLabel = label(
-        "Character: " + selectedCharacter,
-        18,
-        selectedCharacter.equals("Girl") ? PINK : CYAN
-    );
-    profileCharacterLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-    box.add(Box.createVerticalStrut(6));
-    box.add(profileCharacterLabel);
-
-    // XP
-    profileXpLabel = label("Total XP: " + scores.getOrDefault(username, 0), 24, GOLD);
-    profileXpLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-    box.add(Box.createVerticalStrut(6));
-    box.add(profileXpLabel);
-
-    // Correct answers
-    profileCorrectLabel = label(
-        "Correct Answers: " + correctAnswers,
-        17,
-        CREAM
-    );
-    profileCorrectLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-    box.add(profileCorrectLabel);
-
-    // Level
-    profileLevelLabel = label(
-        "Current Level: " + level,
-        17,
-        CREAM
-    );
-    profileLevelLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-    box.add(profileLevelLabel);
-
-    // Hearts
-    profileHeartsLabel = label(
-        "Hearts: " + hearts,
-        17,
-        PEACH
-    );
-    profileHeartsLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-    box.add(profileHeartsLabel);
-
-    center.add(box);
-    p.add(center, BorderLayout.CENTER);
-
-    return p;
-}
+    private JPanel profileScreen() {
+        codeescape.desktop.ui.screens.ProfileScreen.Result res = codeescape.desktop.ui.screens.ProfileScreen.create(
+                new codeescape.desktop.ui.screens.ProfileScreen.Host() {
+                    @Override public JPanel background(String name) { return new BackgroundPanel(name); }
+                    @Override public JPanel panel(int w, int h) { return CodeEscapeApp.this.panel(w, h); }
+                    @Override public JButton navButton(String text) { return CodeEscapeApp.this.navButton(text); }
+                    @Override public void title(JPanel box, String text) { CodeEscapeApp.this.title(box, text); }
+                    @Override public JLabel image(String name, int w, int h) { return CodeEscapeApp.this.image(name, w, h); }
+                    @Override public JLabel label(String text, int size, Color c) { return CodeEscapeApp.this.label(text, size, c); }
+                    @Override public Color gold() { return GOLD; }
+                    @Override public Color cream() { return CREAM; }
+                    @Override public Color cyan() { return CYAN; }
+                    @Override public Color pink() { return PINK; }
+                    @Override public Color peach() { return PEACH; }
+                    @Override public void stopQuestionTimer() { CodeEscapeApp.this.stopQuestionTimer(); }
+                    @Override public void setAcceptingAnswer(boolean accepting) { CodeEscapeApp.this.setAcceptingAnswer(accepting); }
+                    @Override public void refreshDashboard() { CodeEscapeApp.this.refreshDashboard(); }
+                    @Override public void showScreen(String name) { CodeEscapeApp.this.showScreen(name); }
+                    @Override public void startNewLesson() { CodeEscapeApp.this.startNewLesson(); }
+                },
+                username, selectedCharacter, selectedOutfit,
+                outfitFile(selectedCharacter, selectedOutfit),
+                getLifetimeXp(username), session().correctAnswers, session().level, session().hearts
+        );
+        profileAvatar = res.refs.avatar;
+        profilePlayerLabel = res.refs.playerLabel;
+        profileCharacterLabel = res.refs.characterLabel;
+        profileXpLabel = res.refs.xpLabel;
+        profileCorrectLabel = res.refs.correctLabel;
+        profileLevelLabel = res.refs.levelLabel;
+        profileHeartsLabel = res.refs.heartsLabel;
+        return res.panel;
+    }
    
    private void refreshProfile() {
     if (profileAvatar != null) {
@@ -2420,19 +1408,19 @@ private void openTreasureChest() {
 
     if (profileCorrectLabel != null) {
         profileCorrectLabel.setText(
-            "Correct Answers: " + correctAnswers
+            "Correct Answers: " + session().correctAnswers
         );
     }
 
     if (profileLevelLabel != null) {
         profileLevelLabel.setText(
-            "Current Level: " + level
+            "Current Level: " + session().level
         );
     }
 
     if (profileHeartsLabel != null) {
         profileHeartsLabel.setText(
-            "Hearts: " + hearts
+            "Hearts: " + session().hearts
         );
     }
 
@@ -2441,95 +1429,61 @@ private void openTreasureChest() {
 }
 
     // ==================== COMPLETE / GAME OVER / LOGOUT ====================
+    private void goDashboard() {
+        dispatch(codeescape.core.flow.FlowEvent.of(codeescape.core.flow.FlowEvent.Type.DASHBOARD_REQUESTED));
+    }
+
     private JPanel completeScreen() {
-        return messageScreen(
-            "LESSON COMPLETE!",
-            "You finished all 5 levels!",
-            "Final XP: " + xp,
-            "TAKE ANOTHER LESSON",
-            e -> { startNewLesson(); },
-            "HOME",
-            e -> { xp = savedXp; correctAnswers = 0; refreshDashboard(); refreshMainMenuXp(); showScreen("DASHBOARD"); },
-            "castle.png"
-        );
+        codeescape.desktop.ui.screens.MessageScreen.Result r = codeescape.desktop.ui.screens.MessageScreen.create(
+            msgHost(), "LESSON COMPLETE!", "You finished all 5 levels!", "Final XP: " + session().xp,
+            "TAKE ANOTHER LESSON", e -> { startNewLesson(); },
+            "HOME", e -> { lessonEngine.cancelRun(savedXp); refreshDashboard(); refreshMainMenuXp(); goDashboard(); },
+            "castle.png", session().xp);
+        completeXpLabel = r.xpLabel;
+        return r.panel;
     }
 
     private JPanel gameOverScreen() {
-        return messageScreen(
-            "GAME OVER",
-            "You ran out of hearts.",
-            "Final XP: " + xp,
-            "TRY AGAIN",
-            e -> { startNewLesson(); },
-            "HOME",
-            e -> { correctAnswers = 0; refreshDashboard(); showScreen("DASHBOARD"); },
-            "level5.png"
-        );
+        codeescape.desktop.ui.screens.MessageScreen.Result r = codeescape.desktop.ui.screens.MessageScreen.create(
+            msgHost(), "GAME OVER", "You ran out of hearts.", "Final XP: " + session().xp,
+            "TRY AGAIN", e -> { startNewLesson(); },
+            "HOME", e -> { lessonEngine.cancelRun(savedXp); refreshDashboard(); goDashboard(); },
+            "level5.png", session().xp);
+        gameOverXpLabel = r.xpLabel;
+        return r.panel;
     }
 
     private JPanel logoutScreen() {
-        return messageScreen(
-            "LOGOUT",
-            "Are you sure you want to logout?",
-            "Your XP will remain saved for this session.",
-            "YES",
-            e -> {
+        codeescape.desktop.ui.screens.MessageScreen.Result r = codeescape.desktop.ui.screens.MessageScreen.create(
+            msgHost(), "LOGOUT", "Are you sure you want to logout?", "Your XP will remain saved for this session.",
+            "YES", e -> {
                 saveScore();
-                username = "";
-                email = "";
-                selectedCharacter = "Boy";
-                selectedOutfit = 0;
-                xp = 0;
-                hearts = 3;
-                level = 1;
-                questionIndex = 0;
-                showScreen("WELCOME");
+                username = ""; email = "";
+                selectedCharacter = "Boy"; selectedOutfit = 0;
+                lessonEngine.cancelRun(0); session().username = "";
+                // Logout confirmation routed through the core flow contract.
+                dispatch(codeescape.core.flow.FlowEvent.of(codeescape.core.flow.FlowEvent.Type.LOGOUT_CONFIRMED));
             },
-            "NO",
-            e -> showScreen("DASHBOARD"),
-            "level5.png"
-        );
+            "NO", e -> goDashboard(),
+            "level5.png", session().xp);
+        return r.panel;
     }
 
-    private JPanel messageScreen(String titleText, String msg, String detail,
-                                 String a, java.awt.event.ActionListener aa,
-                                 String b, java.awt.event.ActionListener bb,
-                                 String bg) {
-        BackgroundPanel p = new BackgroundPanel(bg);
-        p.setLayout(new GridBagLayout());
-        JPanel box = panel(350, 390);
-        box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
-        title(box, titleText);
-        addCenter(box, msg, 19, CREAM);
-        if ("GAME OVER".equals(titleText)) {
-            gameOverXpLabel = label("Final XP: " + xp, 25, GOLD);
-            gameOverXpLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-            box.add(Box.createVerticalStrut(6));
-            box.add(gameOverXpLabel);
-        } else if ("LESSON COMPLETE!".equals(titleText)) {
-            completeXpLabel = label("Final XP: " + xp, 25, GOLD);
-            completeXpLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-            box.add(Box.createVerticalStrut(6));
-            box.add(completeXpLabel);
-        } else {
-            addCenter(box, detail, 25, GOLD);
-        }
-        box.add(Box.createVerticalStrut(25));
-        JButton x = gold(a);
-        x.setAlignmentX(Component.CENTER_ALIGNMENT);
-        x.addActionListener(aa);
-        box.add(x);
-        box.add(Box.createVerticalStrut(12));
-        JButton y = blue(b);
-        y.setAlignmentX(Component.CENTER_ALIGNMENT);
-        y.addActionListener(bb);
-        box.add(y);
-        p.add(box);
-        return p;
+    private codeescape.desktop.ui.screens.MessageScreen.Host msgHost() {
+        return new codeescape.desktop.ui.screens.MessageScreen.Host() {
+            @Override public JPanel background(String name) { return new BackgroundPanel(name); }
+            @Override public JPanel panel(int w, int h) { return CodeEscapeApp.this.panel(w, h); }
+            @Override public void title(JPanel box, String text) { CodeEscapeApp.this.title(box, text); }
+            @Override public void addCenter(JPanel box, String text, int size, Color c) { CodeEscapeApp.this.addCenter(box, text, size, c); }
+            @Override public JLabel label(String text, int size, Color c) { return CodeEscapeApp.this.label(text, size, c); }
+            @Override public JButton gold(String text) { return CodeEscapeApp.this.gold(text); }
+            @Override public JButton blue(String text) { return CodeEscapeApp.this.blue(text); }
+            @Override public Color cream() { return CREAM; }
+            @Override public Color goldColor() { return GOLD; }
+        };
     }
-
     // ==================== UI HELPERS ====================
-    private JPanel panel(int w, int h) {
+    public JPanel panel(int w, int h) {
         JPanel p = new ModernCardPanel();
         int rw = Math.min(w, Math.max(280, getWidth() > 0 ? getWidth() - 24 : 360));
         int rh = Math.min(h, Math.max(220, getHeight() > 0 ? getHeight() - 100 : h));
@@ -2543,7 +1497,7 @@ private void openTreasureChest() {
         return p;
     }
 
-    private void title(JPanel p, String s) {
+    public void title(JPanel p, String s) {
         int size = getWidth() > 0 && getWidth() <= 500 ? 24 : 30;
         JLabel l = label(s, size, GOLD);
         l.setAlignmentX(Component.CENTER_ALIGNMENT);
@@ -2552,14 +1506,14 @@ private void openTreasureChest() {
         p.add(Box.createVerticalStrut(20));
     }
 
-    private void addCenter(JPanel p, String s, int size, Color c) {
+    public void addCenter(JPanel p, String s, int size, Color c) {
         JLabel l = label(s, size, c);
         l.setAlignmentX(Component.CENTER_ALIGNMENT);
         p.add(Box.createVerticalStrut(6));
         p.add(l);
     }
 
-    private JLabel label(String s, int size, Color c) {
+    public JLabel label(String s, int size, Color c) {
         JLabel l = new JLabel(s);
         int responsiveSize = (getWidth() > 0 && getWidth() <= 500) ? Math.min(size, 22) : size;
         l.setFont(new Font("SansSerif", Font.BOLD, responsiveSize));
@@ -2567,7 +1521,7 @@ private void openTreasureChest() {
         return l;
     }
 
-    private JTextField textField(String tip) {
+    public JTextField textField(String tip) {
         JTextField f = new PlaceholderTextField(tip);
         f.setPreferredSize(new Dimension(310, 46));
         f.setMaximumSize(new Dimension(310, 46));
@@ -2583,7 +1537,7 @@ private void openTreasureChest() {
         return f;
     }
 
-    private JPasswordField passwordField(String tip) {
+    public JPasswordField passwordField(String tip) {
         JPasswordField f = new PlaceholderPasswordField(tip);
         f.setPreferredSize(new Dimension(310, 46));
         f.setMaximumSize(new Dimension(310, 46));
@@ -2619,7 +1573,7 @@ private void openTreasureChest() {
         return b;
     }
 
-    private JButton gold(String s) {
+    public JButton gold(String s) {
         JButton b = base(s);
         b.setBackground(GOLD);
         b.setForeground(new Color(25, 42, 62));
@@ -2627,7 +1581,7 @@ private void openTreasureChest() {
         return b;
     }
 
-    private JButton blue(String s) {
+    public JButton blue(String s) {
         JButton b = base(s);
         b.setBackground(new Color(92, 177, 255));
         b.setForeground(new Color(13, 38, 67));
@@ -2635,7 +1589,7 @@ private void openTreasureChest() {
         return b;
     }
 
-    private JButton smallBlue(String s) {
+    public JButton smallBlue(String s) {
         JButton b = blue(s);
         b.setPreferredSize(new Dimension(220, 42));
         b.setMaximumSize(new Dimension(220, 42));
@@ -2643,7 +1597,7 @@ private void openTreasureChest() {
         return b;
     }
 
-    private JButton link(String s) {
+    public JButton link(String s) {
         JButton b = base(s);
         b.setForeground(new Color(220, 242, 255));
         b.setBackground(new Color(36, 82, 125));
@@ -2664,7 +1618,7 @@ private void openTreasureChest() {
         return b;
     }
 
-    private JButton dashboardActionButton(String s, Color accent) {
+    public JButton dashboardActionButton(String s, Color accent) {
         JButton b = base(s);
         b.setPreferredSize(new Dimension(330, 58));
         b.setMaximumSize(new Dimension(330, 58));
@@ -2705,7 +1659,7 @@ private void openTreasureChest() {
         return b;
     }
 
-    private JLabel image(String n, int w, int h) {
+    public JLabel image(String n, int w, int h) {
         JLabel l = new JLabel();
         l.setHorizontalAlignment(SwingConstants.CENTER);
         l.setVerticalAlignment(SwingConstants.CENTER);
@@ -2794,7 +1748,7 @@ private void openTreasureChest() {
         return out;
     }
 
-    private void error(String s) {
+    public void error(String s) {
         JOptionPane.showMessageDialog(this, s, "Code Escape", JOptionPane.ERROR_MESSAGE);
     }
 
@@ -2857,727 +1811,149 @@ private void openTreasureChest() {
         dialog.setVisible(true);
     }
 
-    private void commitSessionXp() {
-        if (username.isEmpty() || sessionCommitted) return;
-        savedXp = Math.max(0, savedXp + xp);
-        showZeroXpAfterCancelledRun = false;
-        int lifetimeXp = Math.max(0, scores.getOrDefault(username, 0) + xp);
-        scores.put(username, lifetimeXp);
-        sessionCommitted = true;
-        Properties data = new Properties();
-        data.putAll(scoresToStringMap());
-        try (FileOutputStream out = new FileOutputStream("scores.properties")) {
-            data.store(out, "Code Escape player XP scores");
-        } catch (IOException ex) {
-            System.err.println("Could not save XP scores: " + ex.getMessage());
+    private void loadPersistenceIntoCache() {
+        accounts.clear();
+        emails.clear();
+        scores.clear();
+        savedCharacters.clear();
+        savedOutfits.clear();
+        savedStyles.clear();
+        accounts.putAll(profileRepository.getAccounts());
+        emails.putAll(profileRepository.getEmails());
+        scores.putAll(profileRepository.getScores());
+        savedCharacters.putAll(profileRepository.getSavedCharacters());
+        savedOutfits.putAll(profileRepository.getSavedOutfits());
+        savedStyles.putAll(profileRepository.getSavedStyles());
+    }
+
+    private void ensureDemoAccount() {
+        // Called from constructor path; also keep a safe local fallback in cache.
+        if (!accounts.containsKey("demo")) {
+            PlayerProfile demo = new PlayerProfile("demo", "demo@codeescape.local");
+            demo.character = "Boy";
+            demo.outfitVariant = 0;
+            demo.selectedTop = 1; demo.selectedBottom = 1; demo.selectedShoes = 1; demo.selectedAccessory = 1;
+            demo.lifetimeXp = 0; demo.savedXp = 0;
+            profileRepository.saveAccount("demo", "demo@codeescape.local", "demo", demo);
+            loadPersistenceIntoCache();
         }
-        saveUserDatabase();
+        accounts.putIfAbsent("demo", "demo");
+        emails.putIfAbsent("demo", "demo@codeescape.local");
+        scores.putIfAbsent("demo", 0);
+        savedCharacters.putIfAbsent("demo", "Boy");
+        savedOutfits.putIfAbsent("demo", 0);
+        savedStyles.putIfAbsent("demo", new int[]{1, 1, 1, 1});
+    }
+
+    private PlayerProfile snapshotCurrentProfile() {
+        PlayerProfile p = (username == null || username.isEmpty())
+                ? new PlayerProfile(username, email)
+                : profileRepository.findByUsername(username).orElse(new PlayerProfile(username, email));
+        p.username = username == null ? "" : username;
+        p.email = email == null ? emails.getOrDefault(p.username, "") : email;
+        p.character = selectedCharacter == null ? "Boy" : selectedCharacter;
+        p.outfitVariant = Math.max(0, Math.min(3, selectedOutfit));
+        p.selectedTop = selectedTop;
+        p.selectedBottom = selectedBottom;
+        p.selectedShoes = selectedShoes;
+        p.selectedAccessory = selectedAccessory;
+        p.lifetimeXp = Math.max(0, scores.getOrDefault(p.username, savedXp));
+        p.savedXp = Math.max(0, savedXp);
+        return p;
+    }
+
+    private int getLifetimeXp(String name) {
+        if (name == null || name.isEmpty()) return 0;
+        int repoXp = profileRepository.getLifetimeXp(name);
+        scores.put(name, Math.max(0, repoXp));
+        return Math.max(0, repoXp);
+    }
+
+    private void commitSessionXp() {
+        if (username.isEmpty() || session().sessionCommitted) return;
+        profileRepository.commitAttemptXp(username, Math.max(0, session().xp));
+        savedXp = profileRepository.getLifetimeXp(username);
+        scores.put(username, savedXp);
+        lessonEngine.markSessionCommitted();
+        // Persist current character/style/profile fields alongside committed XP for compatibility.
+        profileRepository.saveProfile(snapshotCurrentProfile());
+        loadPersistenceIntoCache();
+        savedXp = scores.getOrDefault(username, savedXp);
     }
 
     // XP is committed only by commitSessionXp() after the entire game is completed.
     private void saveScore() {
         // Intentionally does not save temporary XP from an unfinished run.
-        saveUserDatabase();
-    }
-
-    private Map<String, String> scoresToStringMap() {
-        Map<String, String> values = new HashMap<>();
-        for (Map.Entry<String, Integer> entry : scores.entrySet()) {
-            values.put(entry.getKey(), String.valueOf(entry.getValue()));
+        if (username != null && !username.isEmpty()) {
+            profileRepository.saveProfile(snapshotCurrentProfile());
+            loadPersistenceIntoCache();
         }
-        return values;
     }
 
     // ==================== LOCAL USER DATABASE ====================
-    // Accounts are stored outside the running session so registration survives
-    // closing and reopening the program. Character and XP data are stored too.
+    // Delegated to ProfileRepository (FileProfileRepository) for users.properties/scores.properties compatibility.
     private void saveUserDatabase() {
-        Properties data = new Properties();
-        for (String name : accounts.keySet()) {
-            String key = Base64.getUrlEncoder().withoutPadding()
-                    .encodeToString(name.getBytes(StandardCharsets.UTF_8));
-            data.setProperty("user." + key + ".password", accounts.getOrDefault(name, ""));
-            data.setProperty("user." + key + ".email", emails.getOrDefault(name, ""));
-            data.setProperty("user." + key + ".character", savedCharacters.getOrDefault(name, "Boy"));
-            data.setProperty("user." + key + ".outfit", String.valueOf(savedOutfits.getOrDefault(name, 0)));
-            data.setProperty("user." + key + ".xp", String.valueOf(scores.getOrDefault(name, 0)));
-            int[] style = savedStyles.getOrDefault(name, new int[]{1,1,1,1});
-            for (int i = 0; i < 4; i++) data.setProperty("user." + key + ".style" + i, String.valueOf(style[i]));
+        if (username != null && !username.isEmpty() && accounts.containsKey(username)) {
+            PlayerProfile p = snapshotCurrentProfile();
+            profileRepository.saveProfile(p);
         }
-        try (FileOutputStream out = new FileOutputStream("users.properties")) {
-            data.store(out, "Code Escape local user database");
-        } catch (IOException ex) {
-            System.err.println("Could not save user database: " + ex.getMessage());
-        }
-    }
-
-    private void loadUserDatabase() {
-        File file = new File("users.properties");
-        if (!file.isFile()) return;
-        Properties data = new Properties();
-        try (FileInputStream in = new FileInputStream(file)) {
-            data.load(in);
-            for (String property : data.stringPropertyNames()) {
-                if (!property.startsWith("user.") || !property.endsWith(".password")) continue;
-                String key = property.substring(5, property.length() - 9);
-                try {
-                    String name = new String(Base64.getUrlDecoder().decode(key), StandardCharsets.UTF_8);
-                    accounts.put(name, data.getProperty(property, ""));
-                    emails.put(name, data.getProperty("user." + key + ".email", ""));
-                    savedCharacters.put(name, data.getProperty("user." + key + ".character", "Boy"));
-                    if (data.containsKey("user." + key + ".xp")) {
-                        try {
-                            scores.put(name, Math.max(0, Integer.parseInt(data.getProperty("user." + key + ".xp", "0"))));
-                        } catch (NumberFormatException ignored) {
-                            scores.putIfAbsent(name, 0);
-                        }
-                    }
-                    try {
-                        savedOutfits.put(name, Math.max(0, Math.min(3, Integer.parseInt(data.getProperty("user." + key + ".outfit", "0")))));
-                    } catch (NumberFormatException ignored) {
-                        savedOutfits.put(name, 0);
-                    }
-                    int[] style = new int[4];
-                    for (int i = 0; i < 4; i++) {
-                        try { style[i] = Integer.parseInt(data.getProperty("user." + key + ".style" + i, "1")); }
-                        catch (NumberFormatException ignored) { style[i] = 1; }
-                    }
-                    savedStyles.put(name, style);
-                } catch (IllegalArgumentException ignored) {
-                    // Ignore a damaged user record instead of breaking startup.
-                }
-            }
-        } catch (IOException ex) {
-            System.err.println("Could not load user database: " + ex.getMessage());
-        }
-    }
-
-    private void loadScores() {
-        File file = new File("scores.properties");
-        if (!file.isFile()) return;
-        Properties data = new Properties();
-        try (FileInputStream in = new FileInputStream(file)) {
-            data.load(in);
-            for (String name : data.stringPropertyNames()) {
-                try {
-                    scores.put(name, Math.max(0, Integer.parseInt(data.getProperty(name))));
-                } catch (NumberFormatException ignored) {
-                    // Ignore an invalid saved score and keep the game running.
-                }
-            }
-        } catch (IOException ex) {
-            System.err.println("Could not load XP scores: " + ex.getMessage());
-        }
+        loadPersistenceIntoCache();
     }
 
     // ==================== MUSIC ====================
-    /**
-     * Opens a music track from the classpath first. This makes music work
-     * when the project is run from NetBeans as well as when the JAR is run.
-     * The external music/ folder is kept as a fallback for older copies.
-     */
-    private AudioInputStream openMusic(String fileName) throws Exception {
-        AudioInputStream source = null;
-        String resourcePath = "/music/" + fileName;
-        InputStream resource = CodeEscapeApp.class.getResourceAsStream(resourcePath);
-        if (resource != null) {
-            source = AudioSystem.getAudioInputStream(new BufferedInputStream(resource));
-        } else {
-            File file = new File("music", fileName);
-            if (file.isFile()) {
-                source = AudioSystem.getAudioInputStream(file);
-            }
-        }
-        if (source == null) return null;
-
-        // Force a standard little-endian PCM format so Java Sound can play the
-        // music consistently from NetBeans and from the packaged JAR.
-        AudioFormat target = new AudioFormat(
-            AudioFormat.Encoding.PCM_SIGNED, 44100.0f, 16, 2, 4, 44100.0f, false
-        );
-        AudioFormat sourceFormat = source.getFormat();
-        if (AudioSystem.isConversionSupported(target, sourceFormat)) {
-            return AudioSystem.getAudioInputStream(target, source);
-        }
-        return source;
-    }
-
-    // Small built-in feedback sounds work offline and need no extra downloads.
+    // Delegated to DesktopAudioAdapter (AudioPort wiring); enabled/volume state is adapter-owned.
     private void playFeedbackSound(boolean correct) {
-        try {
-            java.awt.Toolkit.getDefaultToolkit().beep();
-            // Keep the sound effect lightweight and reliable across Java systems.
-        } catch (Exception ignored) {
-            // Audio feedback is optional; gameplay must continue if unavailable.
-        }
-    }
-
-    private void playMusicFile(String fileName, String errorLabel) {
-        if (!musicEnabled) return;
-        try {
-            if (backgroundMusic != null) {
-                backgroundMusic.stop();
-                backgroundMusic.close();
-                backgroundMusic = null;
-            }
-
-            AudioInputStream ais = openMusic(fileName);
-            if (ais == null) {
-                System.out.println(errorLabel + ": music track not found: " + fileName);
-                return;
-            }
-
-            try (AudioInputStream stream = ais) {
-                backgroundMusic = AudioSystem.getClip();
-                backgroundMusic.open(stream);
-            }
-            setMusicVolume(musicVolume);
-            backgroundMusic.setFramePosition(0);
-            backgroundMusic.loop(Clip.LOOP_CONTINUOUSLY);
-            backgroundMusic.start();
-        } catch (Exception e) {
-            System.out.println(errorLabel + " could not be started: " + e.getMessage());
-        }
+        audioAdapter.playFeedback(correct);
     }
 
     private void playLevelMusic(int levelNumber) {
-        currentMusicLevel = levelNumber;
-        String track;
-        switch (levelNumber) {
-            case 1:
-                track = "adventure.wav";
-                break;
-            case 2:
-                track = "blizzard.wav";
-                break;
-            case 3:
-                track = "magma.wav";
-                break;
-            case 4:
-                track = "sky.wav";
-                break;
-            case 5:
-                track = "dark_castle.wav";
-                break;
-            default:
-                track = "code_escape_theme.wav";
-                break;
-        }
-        playMusicFile(track, "Level music");
+        audioAdapter.playLevelMusic(levelNumber);
     }
 
     private void playSpecialMusic(String fileName) {
-        playMusicFile(fileName, "Special music");
+        audioAdapter.playSpecialMusic(fileName);
     }
 
     private void playMainMenuMusic() {
-        // Original upbeat chiptune adventure theme, generated for offline playback.
-        playMusicFile("code_escape_theme.wav", "Main menu music");
+        audioAdapter.playMainMenuMusic();
     }
 
     private void startBackgroundMusic() {
-        if (!musicEnabled) return;
-        playMainMenuMusic();
+        audioAdapter.startBackgroundMusic();
     }
 
     private void stopBackgroundMusic() {
-        if (backgroundMusic != null && backgroundMusic.isRunning()) {
-            backgroundMusic.stop();
-        }
+        audioAdapter.stopMusic();
     }
 
     private void setMusicVolume(float volume) {
-        if (backgroundMusic == null) return;
-        try {
-            FloatControl control = (FloatControl) backgroundMusic.getControl(FloatControl.Type.MASTER_GAIN);
-            if (volume <= 0f) {
-                control.setValue(control.getMinimum());
-            } else {
-                float db = (float) (20.0 * Math.log10(volume));
-                control.setValue(Math.max(control.getMinimum(), Math.min(control.getMaximum(), db)));
-            }
-        } catch (Exception ignored) {}
+        audioAdapter.setVolume(volume);
     }
 
     // ==================== RUNNING ANIMATION ====================
-    class MiniRunner extends JPanel {
-        BufferedImage sheet;
-        int frame = 0;
-        int frameCount = 4;
-        int runnerX = -1;
-        boolean jumping = false;
-        int jumpTicks = 0;
-        javax.swing.Timer timer;
-
-        MiniRunner(String file) {
-            setOpaque(false);
-            setCharacter(file);
-            timer = new javax.swing.Timer(85, e -> {
-                frame = (frame + 1) % Math.max(1, frameCount);
-                if (runnerX >= 0) {
-                    runnerX += 5;
-                    if (runnerX > getWidth()) runnerX = -Math.max(1, getWidth() / 8);
-                }
-                if (jumpTicks > 0) { jumpTicks--; jumping = true; }
-                else jumping = false;
-                repaint();
-            });
-            addHierarchyListener(e -> {
-                if (isShowing() && !timer.isRunning()) timer.start();
-                else if (!isShowing() && timer.isRunning()) timer.stop();
-            });
-        }
-
-        void setCharacter(String file) {
-            sheet = load(file);
-            frame = 0;
-            frameCount = detectFrameCount(sheet);
-            repaint();
-        }
-
-        void jump() {
-            jumpTicks = 12;
-            if (timer != null && !timer.isRunning()) timer.start();
-        }
-
-        void stop() {
-            if (timer != null) timer.stop();
-        }
-
-        protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            if (sheet == null) return;
-            int fw = Math.max(1, sheet.getWidth() / Math.max(1, frameCount));
-            int fh = sheet.getHeight();
-            // Fixed height prevents the old 'growing' effect when the panel
-            // is laid out or resized. The character simply cycles through
-            // the four walking frames at the same size.
-            int dh = Math.min(86, Math.max(64, getHeight() - 6));
-            int dw = (int)Math.round(fw * (dh / (double)fh));
-            if (runnerX < 0) runnerX = 0;
-            int x = runnerX;
-            int y = getHeight() - dh - (jumping ? (int)(28 * Math.sin((12 - jumpTicks) * Math.PI / 12.0)) : 0);
-            Graphics2D g2 = (Graphics2D)g.create();
-            g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-
-            // Every character variant is rendered as ONE complete authored frame.
-            // Never splice the torso from one pose onto legs from another pose:
-            // that caused visible seams and flicker. All eight walk sheets use
-            // four equal full-body frames, so the same stable crop works for Boy
-            // and Girl variants 1-4.
-            int frameIndex = Math.floorMod(frame, Math.max(1, frameCount));
-            int sx1 = frameIndex * fw;
-            int sx2 = Math.min(sheet.getWidth(), sx1 + fw);
-            g2.drawImage(sheet, x, y, x + dw, y + dh,
-                    sx1, 0, sx2, fh, null);
-            g2.dispose();
-        }
-    }
 
     private BufferedImage[] loadIsolatedWalkFrames(String file) {
-        // Trim each authored pose to its own alpha bounds, then place it on a
-        // shared bottom-aligned canvas. Supports the eight-pose generic sheets
-        // and the four-pose color-specific variant sheets.
-        if (file == null || !file.matches("modern_(boy|girl)_(walk(_v[1-4])?|run_v[1-4])\\.png")) return null;
-        BufferedImage source = load(file);
-        if (source == null) return null;
-        final int count;
-        if (source.getWidth() == 2240 && source.getHeight() == 380) count = 8;
-        else if (source.getWidth() == 384 && (source.getHeight() == 365 || source.getHeight() == 390)) count = 4;
-        else return null;
-        final int cellWidth = source.getWidth() / count;
-        Rectangle[] bounds = new Rectangle[count];
-        int canvasWidth = 1;
-        int canvasHeight = 1;
-
-        for (int i = 0; i < count; i++) {
-            int minX = cellWidth, minY = source.getHeight();
-            int maxX = -1, maxY = -1;
-            for (int y = 0; y < source.getHeight(); y++) {
-                for (int x = i * cellWidth; x < (i + 1) * cellWidth; x++) {
-                    if ((source.getRGB(x, y) >>> 24) > 8) {
-                        minX = Math.min(minX, x - i * cellWidth);
-                        minY = Math.min(minY, y);
-                        maxX = Math.max(maxX, x - i * cellWidth);
-                        maxY = Math.max(maxY, y);
-                    }
-                }
-            }
-            if (maxX < minX || maxY < minY) return null;
-            bounds[i] = new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1);
-            canvasWidth = Math.max(canvasWidth, bounds[i].width);
-            canvasHeight = Math.max(canvasHeight, bounds[i].height);
-        }
-
-        BufferedImage[] frames = new BufferedImage[count];
-        for (int i = 0; i < count; i++) {
-            Rectangle b = bounds[i];
-            BufferedImage frameImage = new BufferedImage(canvasWidth, canvasHeight, BufferedImage.TYPE_INT_ARGB);
-            Graphics2D fg = frameImage.createGraphics();
-            fg.setComposite(AlphaComposite.Src);
-            fg.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-            BufferedImage crop = source.getSubimage(i * cellWidth + b.x, b.y, b.width, b.height);
-            int dx = (canvasWidth - b.width) / 2;
-            int dy = canvasHeight - b.height;
-            fg.drawImage(crop, dx, dy, null);
-            fg.dispose();
-            frames[i] = frameImage;
-        }
-        return frames;
+        return codeescape.desktop.ui.animation.SpriteFrames.loadIsolatedWalkFrames(this::load, file);
     }
 
     private int detectFrameCount(BufferedImage image) {
-        if (image == null) return 1;
-        // The clean side-running sheets contain eight separated poses.
-        if (image.getWidth() == 2240) return 8;
-        // Legacy overlapping modern_boy/girl_walk_v1..v4 sheets.
-        // Explicitly recognize them so every variant uses identical frame
-        // boundaries and cannot fall back to a single flickering image.
-        if (image.getWidth() == 384 && (image.getHeight() == 365 || image.getHeight() == 390)) return 4;
-        // Compatibility with earlier bundled four-frame sheets.
-        if (image.getWidth() == 640 && image.getHeight() == 400) return 4;
-        if (image.getWidth() == 173 || image.getWidth() == 171 || image.getWidth() == 229 || image.getWidth() == 740) {
-            return image.getWidth() >= 220 ? 4 : 3;
-        }
-        if (image.getWidth() % 4 == 0) return 4;
-        if (image.getWidth() % 3 == 0) return 3;
-        return 1;
+        return codeescape.desktop.ui.animation.SpriteFrames.detectFrameCount(image);
     }
 
     private int[] frameSequenceFor(int count) {
-        // A running sprite sheet is a forward-moving cycle. Never play the
-        // frames backward: reversing the stride makes the legs look as though
-        // they are swinging left and right instead of running forward.
-        if (count <= 1) return new int[]{0};
-        int[] sequence = new int[count];
-        for (int i = 0; i < count; i++) sequence[i] = i;
-        return sequence;
+        return codeescape.desktop.ui.animation.SpriteFrames.frameSequenceFor(count);
+    }
+    // MiniRunner and MovingRunner animation views migrated to codeescape.desktop.ui.animation.*
+
+
+    // Migrated to desktop UI component; thin adapter keeps legacy constructor/API.
+    class BackgroundPanel extends codeescape.desktop.ui.components.BackgroundPanel {
+        BackgroundPanel(String n) { super(n, CodeEscapeApp.this::load); }
     }
 
-    class MovingRunner extends JPanel {
-        BufferedImage sheet;
-        BufferedImage[] isolatedFrames;
-        double x;
-        int frame = 0;
-        long startNanos;
-        long lastNanos;
-        javax.swing.Timer timer;
-        Runnable onFinished;
-        JProgressBar progressBar;
-        private int frameCount = 1;
-        private int[] runFrames = {0};
-        private boolean spriteSheet;
-        private boolean staticCharacter;
-        private static final long RUN_DURATION_NANOS = 6_000_000_000L;
-        private static final long FRAME_DURATION_NANOS = 120_000_000L;
+    // UI component classes migrated to codeescape.desktop.ui.components (imported above).
 
-        MovingRunner(String file) {
-            setOpaque(false);
-            setDoubleBuffered(true);
-            sheet = load(file);
-            isolatedFrames = loadIsolatedWalkFrames(file);
-            // Use the generated eight-pose, full-body run sheet for the selected
-            // character variant. Each pose is separated by a full cell, so
-            // no neighboring character fragments can enter the rendered frame.
-            spriteSheet = isolatedFrames != null && isolatedFrames.length > 1;
-            staticCharacter = !spriteSheet;
-            frameCount = spriteSheet ? isolatedFrames.length : 1;
-            runFrames = spriteSheet ? frameSequenceFor(frameCount) : new int[]{0};
-            x = -120;
-            startNanos = System.nanoTime();
-            lastNanos = startNanos;
-            timer = new javax.swing.Timer(15, e -> {
-                long now = System.nanoTime();
-                long elapsed = now - startNanos;
-                long delta = Math.max(0L, now - lastNanos);
-                lastNanos = now;
-
-                int target = Math.max(10, getWidth() - getDisplayWidth() - 20);
-                double startX = -getDisplayWidth() - 4.0;
-                double progress = Math.min(1.0, elapsed / (double) RUN_DURATION_NANOS);
-                // Smooth horizontal movement so the transition run feels less mechanical.
-                double eased = progress * progress * (3.0 - 2.0 * progress);
-                x = startX + (target - startX) * eased;
-                if (progressBar != null) progressBar.setValue((int)Math.round(eased * 100));
-
-                // Derive the pose directly from elapsed time. This prevents timer
-                // jitter or delayed Swing events from repeatedly toggling poses.
-                // Static fallback art stays completely still instead of flickering
-                // through artificial rotations/scales.
-                if (!staticCharacter) {
-                    frame = (int) ((elapsed / FRAME_DURATION_NANOS) % runFrames.length);
-                } else {
-                    frame = 0;
-                }
-
-                if (progress >= 1.0) {
-                    x = target;
-                    timer.stop();
-                    repaint();
-                    if (onFinished != null) SwingUtilities.invokeLater(onFinished);
-                    return;
-                }
-                repaint();
-            });
-            addHierarchyListener(e -> {
-                if (isShowing() && !timer.isRunning()) {
-                    startNanos = System.nanoTime();
-                    lastNanos = startNanos;
-                    timer.start();
-                } else if (!isShowing() && timer.isRunning()) {
-                    timer.stop();
-                }
-            });
-        }
-
-        private int getFrameWidth() {
-            if (spriteSheet && isolatedFrames != null) return isolatedFrames[0].getWidth();
-            return sheet == null ? 1 : sheet.getWidth();
-        }
-
-        private int getFrameHeight() {
-            if (spriteSheet && isolatedFrames != null) return isolatedFrames[0].getHeight();
-            return sheet == null ? 1 : sheet.getHeight();
-        }
-
-        private int getDisplayHeight() {
-            // Keep the transition runner balanced: larger than the compact size, but smaller than the original.
-            int available = getHeight() > 0 ? getHeight() : 480;
-            return Math.min(190, Math.max(160, available / 3));
-        }
-
-        private int getDisplayWidth() {
-            // Keep the original proportions of a single 96px pose cell.
-            // The previous fixed wide value stretched the character and made
-            // neighboring-pose artifacts more noticeable.
-            double sourceRatio = getFrameWidth() / (double)Math.max(1, getFrameHeight());
-            return Math.max(68, (int)Math.round(getDisplayHeight() * sourceRatio));
-        }
-
-        void stop() {
-            if (timer != null) timer.stop();
-        }
-
-        protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            if (sheet == null) return;
-            int fw = getFrameWidth();
-            int fh = getFrameHeight();
-            int dh = getDisplayHeight();
-            int dw = getDisplayWidth();
-
-            // Stable ground line and stable sprite geometry: the only changing
-            // pixels are the authored poses in the sprite sheet. Avoid rotating,
-            // stretching, or swapping a full character image, which creates a
-            // flicker/ghosting effect on transition screens.
-            int y = Math.max(0, getHeight() - dh - 8);
-
-            Graphics2D g2 = (Graphics2D)g.create();
-            g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-            g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            g2.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_QUALITY);
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            int shadowW = Math.max(32, (int)(dw * 0.66));
-            int shadowH = 7;
-            g2.setColor(new Color(3, 13, 28, 90));
-            g2.fillOval((int)Math.round(x) + (dw-shadowW)/2, getHeight()-15, shadowW, shadowH);
-            int sx = runFrames[frame % runFrames.length];
-            if (spriteSheet && isolatedFrames != null) {
-                // Each frame is a complete isolated character on a normalized
-                // transparent canvas. Draw exactly one frame per repaint.
-                BufferedImage pose = isolatedFrames[sx];
-                g2.drawImage(pose, (int)Math.round(x), y,
-                        (int)Math.round(x) + dw, y + dh, 0, 0, pose.getWidth(), pose.getHeight(), null);
-            } else {
-                // Static fallback remains one selected character, never a sheet crop.
-                g2.drawImage(sheet, (int)Math.round(x), y,
-                        (int)Math.round(x) + dw, y + dh, 0, 0, fw, fh, null);
-            }
-            g2.dispose();
-        }
-    }
-
-    class BackgroundPanel extends JPanel {
-        BufferedImage bg;
-
-        BackgroundPanel(String n) {
-            bg = load(n);
-            setOpaque(true);
-            setBackground(new Color(19, 43, 72));
-        }
-
-        void setBackgroundImage(String n) {
-            bg = load(n);
-            repaint();
-        }
-
-        protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            if (bg == null) return;
-            Graphics2D g2 = (Graphics2D) g.create();
-            g2.setColor(new Color(19, 43, 72));
-            g2.fillRect(0, 0, getWidth(), getHeight());
-            // Fill the entire window without black bars. Anchor the image at the top
-            // so the important upper part of the artwork is never cropped off.
-            double s = Math.max(getWidth() / (double) bg.getWidth(), getHeight() / (double) bg.getHeight());
-            int w = Math.max(1, (int)Math.round(bg.getWidth() * s));
-            int h = Math.max(1, (int)Math.round(bg.getHeight() * s));
-            int x = (getWidth() - w) / 2;
-            int y = 0;
-            // Bilinear scaling keeps the background crisp and avoids the extra
-            // softness caused by bicubic interpolation on these game images.
-            g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-            g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            g2.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_QUALITY);
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2.drawImage(bg, x, y, w, h, null);
-            // Keep the artwork bright; panels provide contrast for text.
-            g2.dispose();
-        }
-    }
-
-    // Soft translucent cards provide a modern HUD without obscuring the level art.
-    static class GlassPanel extends JPanel {
-        private final Color fill;
-        GlassPanel(Color fill) { this.fill = fill; setOpaque(false); }
-        @Override protected void paintComponent(Graphics g) {
-            Graphics2D g2 = (Graphics2D) g.create();
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2.setColor(fill);
-            g2.fillRoundRect(0, 0, getWidth(), getHeight(), 22, 22);
-            g2.setColor(new Color(255, 255, 255, 38));
-            g2.drawRoundRect(0, 0, getWidth()-1, getHeight()-1, 22, 22);
-            g2.dispose();
-            super.paintComponent(g);
-        }
-    }
-
-    // Modern rounded controls keep the original game flow and logic intact.
-    static class RoundedBorder implements javax.swing.border.Border {
-        private final Color color;
-        private final int thickness;
-        private final int arc;
-        RoundedBorder(Color color, int thickness, int arc) {
-            this.color = color;
-            this.thickness = thickness;
-            this.arc = arc;
-        }
-        @Override public Insets getBorderInsets(Component c) {
-            int pad = Math.max(5, thickness + 4);
-            return new Insets(pad, pad + 2, pad, pad + 2);
-        }
-        @Override public boolean isBorderOpaque() { return false; }
-        @Override public void paintBorder(Component c, Graphics g, int x, int y, int w, int h) {
-            Graphics2D g2 = (Graphics2D) g.create();
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2.setColor(color);
-            g2.setStroke(new BasicStroke(thickness));
-            int off = thickness;
-            g2.drawRoundRect(x + off, y + off, Math.max(0, w - off * 2 - 1),
-                    Math.max(0, h - off * 2 - 1), arc, arc);
-            g2.dispose();
-        }
-    }
-
-    static class ModernButton extends JButton {
-        ModernButton(String text) {
-            super(text);
-            setOpaque(false);
-            setContentAreaFilled(false);
-            setBorderPainted(true);
-            setFocusPainted(false);
-            addMouseListener(new java.awt.event.MouseAdapter() {
-                @Override public void mouseEntered(java.awt.event.MouseEvent e) {
-                    putClientProperty("modernHover", Boolean.TRUE);
-                    repaint();
-                }
-                @Override public void mouseExited(java.awt.event.MouseEvent e) {
-                    putClientProperty("modernHover", Boolean.FALSE);
-                    repaint();
-                }
-            });
-        }
-        @Override protected void paintComponent(Graphics g) {
-            Graphics2D g2 = (Graphics2D) g.create();
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            g2.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_QUALITY);
-            Color base = getBackground();
-            if (base == null) base = new Color(72, 150, 218);
-            boolean hover = Boolean.TRUE.equals(getClientProperty("modernHover")) && isEnabled();
-            Color top = hover ? base.brighter() : new Color(
-                    Math.min(255, base.getRed() + 14),
-                    Math.min(255, base.getGreen() + 14),
-                    Math.min(255, base.getBlue() + 14));
-            Color bottom = isEnabled() ? base : new Color(125, 137, 151);
-            if (getModel().isPressed()) {
-                top = base.darker();
-                bottom = base.darker();
-            }
-            g2.setPaint(new GradientPaint(0, 0, top, 0, getHeight(), bottom));
-            g2.fillRoundRect(1, 1, getWidth() - 2, getHeight() - 2, 18, 18);
-            if (hover) {
-                g2.setColor(new Color(255, 255, 255, 34));
-                g2.fillRoundRect(2, 2, getWidth() - 4, Math.max(8, getHeight() / 2), 16, 16);
-            }
-            g2.dispose();
-            setOpaque(false);
-            setContentAreaFilled(false);
-            super.paintComponent(g);
-        }
-    }
-
-    static class ModernCardPanel extends JPanel {
-        ModernCardPanel() { setOpaque(false); }
-        @Override protected void paintComponent(Graphics g) {
-            Graphics2D g2 = (Graphics2D) g.create();
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            Color c = getBackground() == null ? new Color(20, 51, 86, 238) : getBackground();
-            Color top = new Color(Math.min(255, c.getRed() + 10),
-                    Math.min(255, c.getGreen() + 14), Math.min(255, c.getBlue() + 18), c.getAlpha());
-            g2.setPaint(new GradientPaint(0, 0, top, 0, getHeight(), c));
-            g2.fillRoundRect(0, 0, getWidth(), getHeight(), 24, 24);
-            // A subtle inner highlight gives the card a polished game HUD feel.
-            g2.setColor(new Color(255, 255, 255, 18));
-            g2.drawRoundRect(2, 2, Math.max(0, getWidth() - 5), Math.max(0, getHeight() - 5), 22, 22);
-            g2.dispose();
-            super.paintComponent(g);
-        }
-    }
-
-    static class PlaceholderTextField extends JTextField {
-        private final String placeholder;
-        PlaceholderTextField(String placeholder) { this.placeholder = placeholder; }
-        @Override protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            if (getText().isEmpty() && !isFocusOwner()) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                g2.setColor(new Color(190, 205, 225));
-                g2.setFont(getFont());
-                Insets in = getInsets();
-                g2.drawString(placeholder, in.left, getHeight() / 2 + getFont().getSize() / 2 - 3);
-                g2.dispose();
-            }
-        }
-    }
-
-    static class PlaceholderPasswordField extends JPasswordField {
-        private final String placeholder;
-        PlaceholderPasswordField(String placeholder) { this.placeholder = placeholder; }
-        @Override protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            if (getPassword().length == 0 && !isFocusOwner()) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                g2.setColor(new Color(190, 205, 225));
-                g2.setFont(getFont());
-                Insets in = getInsets();
-                g2.drawString(placeholder, in.left, getHeight() / 2 + getFont().getSize() / 2 - 3);
-                g2.dispose();
-            }
-        }
-    }
-
-    static class Question { String text; String[] answers; int correct; boolean syntax; String expected; Question(String text,String[] answers,int correct,boolean syntax,String expected){this.text=text;this.answers=answers;this.correct=correct;this.syntax=syntax;this.expected=expected;} }
+    // Question model moved to core (codeescape.core.model.Question) for reuse across frontends.
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
@@ -3590,3 +1966,14 @@ private void openTreasureChest() {
         });
     }
 }
+
+
+
+
+
+
+
+
+
+
+

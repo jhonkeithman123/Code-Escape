@@ -1,0 +1,38 @@
+plugins {
+    id("com.android.application") version "8.2.2" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+}
+
+def versionProps = new Properties()
+file("version.properties").withInputStream { versionProps.load(it) }
+
+allprojects {
+    group = "codeescape"
+    version = versionProps.getProperty("version", "0.1.0")
+}
+
+subprojects { proj ->
+    plugins.withId("java") {
+        java {
+            // Produce Java 8 bytecode for maximum compatibility (core/desktop).
+            if (JavaVersion.current().isJava9Compatible()) {
+                toolchain { languageVersion = JavaLanguageVersion.of(8) }
+            } else {
+                sourceCompatibility = JavaVersion.VERSION_1_8
+                targetCompatibility = JavaVersion.VERSION_1_8
+            }
+        }
+        tasks.withType(JavaCompile).configureEach {
+            options.encoding = "UTF-8"
+            // The Java 8 toolchain above already compiles with javac 8;
+            // `options.release` is a JDK 9+ flag and must not be set here.
+        }
+        tasks.withType(Test).configureEach {
+            useJUnitPlatform()
+        }
+    }
+}
+
+tasks.register("printVersion") {
+    doLast { println(project.version) }
+}

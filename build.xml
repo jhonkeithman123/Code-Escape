@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project name="CodeEscape" default="run" basedir=".">
     <property name="src.dir" value="src"/>
+    <property name="core.src.dir" value="core/src/main/java"/>
+    <property name="desktop.src.dir" value="desktop/src/main/java"/>
     <property name="build.dir" value="build"/>
     <property name="classes.dir" value="${build.dir}/classes"/>
     <property name="dist.dir" value="dist"/>
@@ -13,8 +15,13 @@
 
     <target name="compile">
         <mkdir dir="${classes.dir}"/>
-        <javac srcdir="${src.dir}" destdir="${classes.dir}" encoding="UTF-8"
-               source="8" target="8" includeantruntime="false"/>
+        <!-- Compile migrated modules and legacy app together (desktop bridge depends on src.CodeEscapeApp) -->
+        <javac destdir="${classes.dir}" encoding="UTF-8"
+               source="8" target="8" includeantruntime="false">
+            <src path="${core.src.dir}"/>
+            <src path="${desktop.src.dir}"/>
+            <src path="${src.dir}"/>
+        </javac>
         <copy todir="${classes.dir}">
             <fileset dir="${src.dir}" excludes="**/*.java"/>
         </copy>

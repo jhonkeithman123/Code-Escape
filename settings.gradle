@@ -1,0 +1,25 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
+
+plugins {
+    // Auto-provision JDK toolchains (e.g. JDK 8 for core/desktop) when no local
+    // JDK 8 installation is present. CI machines with setup-java-installed JDKs
+    // still resolve via auto-detect; download is only the fallback.
+    id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "CodeEscape"
+include(":core", ":desktop", ":android")

@@ -1,0 +1,158 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
+def releaseStoreFilePath = (keystoreProperties.getProperty("storeFile")
+        ?: System.getenv("ANDROID_KEYSTORE_PATH")
+        ?: findProperty("android.injected.signing.store.file"))
+def releaseStorePassword = (keystoreProperties.getProperty("storePassword")
+        ?: System.getenv("ANDROID_KEYSTORE_PASSWORD")
+        ?: findProperty("android.injected.signing.store.password"))
+def releaseKeyAlias = (keystoreProperties.getProperty("keyAlias")
+        ?: System.getenv("ANDROID_KEY_ALIAS")
+        ?: findProperty("android.injected.signing.key.alias"))
+def releaseKeyPassword = (keystoreProperties.getProperty("keyPassword")
+        ?: System.getenv("ANDROID_KEY_PASSWORD")
+        ?: findProperty("android.injected.signing.key.password"))
+def signingValues = [storeFile: releaseStoreFilePath, storePassword: releaseStorePassword,
+                     keyAlias: releaseKeyAlias, keyPassword: releaseKeyPassword]
+def missingSigningKeys = signingValues.findAll { !it.value }.keySet()
+def hasReleaseSigning = missingSigningKeys.isEmpty()
+
+// Fail-safe diagnostics: debug builds are never affected; problems surface as
+// warnings at configuration time and the release APK is simply unsigned.
+if (!missingSigningKeys.isEmpty()) {
+    if (missingSigningKeys.size() < signingValues.size()) {
+        println("WARNING: Android release signing is only PARTIALLY configured; missing: ${missingSigningKeys.join(', ')}. " +
+                "The release APK will be UNSIGNED until all of: keystore.properties (storeFile, storePassword, keyAlias, keyPassword), " +
+                "ANDROID_KEYSTORE_* / ANDROID_KEY_* environment variables, or android.injected.signing.* Gradle properties are provided. " +
+                "Debug builds are unaffected. See keystore.properties.example.")
+    } else if (keystorePropertiesFile.exists()) {
+        println("NOTE: ${keystorePropertiesFile.name} exists but is empty/invalid; release builds will be unsigned. See keystore.properties.example.")
+    }
+}
+if (hasReleaseSigning) {
+    def storeFileResolved = rootProject.file(releaseStoreFilePath.toString())
+    if (!storeFileResolved.exists()) {
+        println("WARNING: Android release keystore file not found at: ${storeFileResolved} - release packaging will fail. " +
+                "Check storeFile in keystore.properties or ANDROID_KEYSTORE_PATH.")
+    }
+}
+
+android {
+    namespace = "codeescape.android"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "codeescape.android"
+        minSdk = 24
+        targetSdk = 34
+        versionCode = 1
+        versionName = project.version.toString()
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile = rootProject.file(releaseStoreFilePath.toString())
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled = false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.release
+            }
+        }
+        debug {
+            debuggable = true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+        coreLibraryDesugaringEnabled = true
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.10"
+    }
+
+    packaging {
+        resources {
+            excludes += ["/META-INF/{AL2.0,LGPL2.1}"]
+        }
+    }
+
+    sourceSets {
+        main {
+            // Reuse existing game assets during migration; Android-specific resources take precedence in res/.
+            assets.srcDirs += ["../src/images", "../src/music", "../src"]
+        }
+    }
+}
+
+dependencies {
+    implementation(project(":core"))
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+
+    implementation(platform("androidx.compose:compose-bom:2024.02.02"))
+    implementation("androidx.activity:activity-compose:1.8.2")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
+    implementation("androidx.navigation:navigation-compose:2.7.7")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+}
+
+// NOTE: The task name `packageRelease` is reserved by the Android Gradle Plugin
+// (it packages the release APK for the release variant). Our versioned-output
+// collector therefore uses a distinct name. It packages the signed release APK
+// when release signing is configured, otherwise falls back to the debug APK.
+tasks.register("packageReleaseArtifacts") {
+    group = "build"
+    description = "Copies a distributable Android APK (release if signed, else debug) into output/v<version>/android."
+    dependsOn(hasReleaseSigning ? "assembleRelease" : "assembleDebug")
+    doLast {
+        def v = project.version.toString()
+        def outDir = file("${rootDir}/output/v${v}/android")
+        outDir.mkdirs()
+        def variant = hasReleaseSigning ? "release" : "debug"
+        def apkDir = file("${buildDir}/outputs/apk/${variant}")
+        if (apkDir.exists()) {
+            copy {
+                from(apkDir) { include("*.apk") }
+                into(outDir)
+            }
+        }
+        if (hasReleaseSigning) {
+            println("Android release APK packaged to: ${outDir}")
+        } else {
+            println("Android debug APK packaged to: ${outDir} (no release signing configured; see keystore.properties.example)")
+        }
+    }
+}

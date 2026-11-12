@@ -1,0 +1,50 @@
+plugins {
+    id("application")
+    id("java")
+}
+
+dependencies {
+    implementation(project(":core"))
+    testImplementation(platform("org.junit:junit-bom:5.10.2"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+}
+
+application {
+    mainClass = "codeescape.desktop.DesktopApp"
+}
+
+// Legacy compatibility: include existing sources/resources during migration if present.
+sourceSets {
+    main {
+        java {
+            srcDir("../src")
+        }
+        resources {
+            srcDir("../src")
+            exclude("**/*.java")
+        }
+    }
+}
+
+jar {
+    archiveBaseName = "CodeEscape"
+    archiveVersion = project.version.toString()
+    manifest {
+        attributes("Main-Class": application.mainClass.get())
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+tasks.register("packageRelease") {
+    dependsOn("jar")
+    doLast {
+        def v = project.version.toString()
+        def outDir = file("${rootDir}/output/v${v}/desktop")
+        outDir.mkdirs()
+        copy {
+            from(tasks.named("jar").get().archiveFile)
+            into(outDir)
+        }
+        println("Desktop artifact packaged to: ${outDir}")
+    }
+}

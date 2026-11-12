@@ -10,3 +10,37 @@
 # Graphify outputs
 /graphify-out/
 /.graphify/
+
+# Gradle
+/.gradle/
+/**/build/
+/local.properties
+
+# Android
+/captures/
+/.externalNativeBuild/
+/.cxx/
+*.apk
+*.aab
+
+# Android release signing / keystores (keep secrets local)
+/keystore.properties
+/*.keystore
+/*.jks
+*.keystore
+*.jks
+*.pem
+*.p12
+*.key
+keystore/
+.android-signing/
+
+# Release outputs
+/output/
+/output/**
+
+# IDE
+/.idea/
+*.iml
+.DS_Store
+Thumbs.db
