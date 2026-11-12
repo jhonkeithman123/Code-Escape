@@ -1,0 +1,12 @@
+# NetBeans / build outputs
+/build/
+/dist/
+/nbproject/private/
+
+# Local runtime data
+/scores.properties
+/users.properties
+
+# Graphify outputs
+/graphify-out/
+/.graphify/
