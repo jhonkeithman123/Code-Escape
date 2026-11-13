@@ -3,9 +3,13 @@ package codeescape.android.app
 import android.app.Activity
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -39,6 +43,7 @@ import codeescape.core.content.GameConfig
 import codeescape.core.content.LevelMetadata
 import codeescape.core.content.StoryContent
 import codeescape.core.flow.FlowState
+import codeescape.core.flow.FlowTransitions
 import kotlinx.coroutines.delay
 
 @Composable
@@ -124,22 +129,7 @@ fun GameApp(activity: Activity) {
     }
 }
 
-private fun routeFor(state: FlowState): String = when (state) {
-    FlowState.WELCOME -> "welcome"
-    FlowState.LOADING -> "loading"
-    FlowState.LOGIN -> "login"
-    FlowState.REGISTER -> "register"
-    FlowState.CHARACTER -> "character"
-    FlowState.STORY_INTRO, FlowState.STORY_LEVEL2, FlowState.STORY_LEVEL3, FlowState.STORY_LEVEL4, FlowState.STORY_LEVEL5 -> "story"
-    FlowState.DASHBOARD -> "dashboard"
-    FlowState.QUESTION -> "question"
-    FlowState.RUNNING_TRANSITION -> "running"
-    FlowState.PROFILE -> "profile"
-    FlowState.COMPLETE -> "complete"
-    FlowState.GAMEOVER -> "gameover"
-    FlowState.ENDING -> "ending"
-    FlowState.LOGOUT -> "logout"
-}
+private fun routeFor(state: FlowState): String = FlowTransitions.routePath(state)
 
 @Composable
 fun BackgroundImage(name: String, modifier: Modifier = Modifier, alpha: Float = 1f) {
@@ -160,9 +150,12 @@ fun ScreenScaffold(bg: String? = null, overlayAlpha: Float = 0.45f, content: @Co
             Brush.verticalGradient(listOf(Color(0xAA071522), Color(0xCC071522).copy(alpha = overlayAlpha.coerceIn(0.2f, 0.95f))))
         ))
         Column(
-            Modifier.fillMaxSize().padding(20.dp),
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp, vertical = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
+            verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
             content = content
         )
     }
@@ -172,18 +165,30 @@ fun ScreenScaffold(bg: String? = null, overlayAlpha: Float = 0.45f, content: @Co
 fun WelcomeScreen(app: GameAppState) {
     ScreenScaffold(bg = "castle.png", overlayAlpha = 0.35f) {
         Text("CODE ESCAPE", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFF5AF5E6))
-        Spacer(Modifier.height(8.dp))
         Text("Shared core • Android (Compose + Canvas)", color = Color.White.copy(alpha = 0.9f), textAlign = TextAlign.Center)
-        Spacer(Modifier.height(28.dp))
-        Button(onClick = { app.screen = FlowState.LOGIN }, modifier = Modifier.fillMaxWidth(0.7f)) { Text("Login") }
-        Spacer(Modifier.height(10.dp))
-        OutlinedButton(onClick = { app.screen = FlowState.REGISTER }, modifier = Modifier.fillMaxWidth(0.7f)) { Text("Register") }
+        Spacer(Modifier.height(12.dp))
+        Button(onClick = { app.screen = FlowState.LOGIN }, modifier = Modifier.fillMaxWidth().widthIn(max = 420.dp)) { Text("Login") }
+        OutlinedButton(onClick = { app.screen = FlowState.REGISTER }, modifier = Modifier.fillMaxWidth().widthIn(max = 420.dp)) { Text("Register") }
     }
 }
 
 @Composable
 fun LoadingScreen(app: GameAppState) {
     var progress by remember { mutableStateOf(0f) }
+    val profile = app.currentProfile
+    val isGirl = (profile?.character ?: "Boy").equals("Girl", ignoreCase = true)
+    val variant = (profile?.outfitVariant ?: 0).coerceIn(0, 3)
+    val context = LocalContext.current
+    val frames by produceState<List<android.graphics.Bitmap>?>(initialValue = null, isGirl, variant) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val runFile = codeescape.android.render.SpriteAssets.runnerOutfitFile(isGirl, variant)
+            codeescape.android.render.SpriteAssets.loadIsolatedWalkFrames(context, runFile)
+                ?: codeescape.android.render.SpriteAssets.loadIsolatedWalkFrames(
+                    context,
+                    if (isGirl) "modern_girl_walk.png" else "modern_boy_walk.png"
+                )
+        }
+    }
     LaunchedEffect(Unit) {
         val start = System.currentTimeMillis()
         while (progress < 1f) {
@@ -191,12 +196,73 @@ fun LoadingScreen(app: GameAppState) {
             progress = (elapsed / GameConfig.LOADING_DELAY_MS.toFloat()).coerceIn(0f, 1f)
             delay(16)
         }
+        progress = 1f
         app.onLoadingFinished()
     }
     ScreenScaffold(bg = "loading.png", overlayAlpha = 0.5f) {
         Text("Loading assets...", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(16.dp))
-        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(0.7f))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.7f)
+                .height(140.dp),
+            contentAlignment = Alignment.BottomStart
+        ) {
+            val frameList = frames
+            val frameIdx = if (!frameList.isNullOrEmpty()) {
+                ((progress * frameList.size * 8).toInt()).coerceAtLeast(0) % frameList.size
+            } else 0
+            // Runner character synced to the same progress value as the loading bar
+            androidx.compose.foundation.layout.BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val trackWidth = maxWidth
+                val runnerHeight = 84.dp
+                val runnerWidth = 46.dp
+                val xOffset = (trackWidth - runnerWidth) * progress.coerceIn(0f, 1f)
+                val bmp = frameList?.getOrNull(frameIdx)
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = "Loading character",
+                        modifier = Modifier
+                            .offset(x = xOffset, y = 0.dp)
+                            .size(width = runnerWidth, height = runnerHeight)
+                            .align(Alignment.BottomStart),
+                        contentScale = ContentScale.Fit
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .offset(x = xOffset, y = 0.dp)
+                            .size(width = runnerWidth, height = runnerHeight)
+                            .align(Alignment.BottomStart)
+                            .background(Color(0xFF69E5F5), RoundedCornerShape(10.dp))
+                    )
+                }
+                // subtle track line
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .background(Color(0x33FFFFFF))
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        // Custom progress bar drawn from the same progress value as the runner (avoids indicator animation desync)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.7f)
+                .height(8.dp)
+                .background(Color(0x33FFFFFF), RoundedCornerShape(999.dp))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(progress.coerceIn(0f, 1f))
+                    .fillMaxHeight()
+                    .background(Color(0xFF5AF5E6), RoundedCornerShape(999.dp))
+            )
+        }
     }
 }
 
@@ -206,8 +272,8 @@ fun LoginScreen(app: GameAppState) {
     var pass by rememberSaveable { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     ScreenScaffold(bg = "castle.png", overlayAlpha = 0.5f) {
-        Card(colors = CardDefaults.cardColors(containerColor = Color(0xCC10263D)), shape = RoundedCornerShape(16.dp)) {
-            Column(Modifier.padding(20.dp).fillMaxWidth(0.85f), horizontalAlignment = Alignment.CenterHorizontally) {
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xCC10263D)), shape = RoundedCornerShape(16.dp), modifier = Modifier.widthIn(max = 460.dp)) {
+            Column(Modifier.padding(20.dp).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Login", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(value = user, onValueChange = { user = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -230,8 +296,8 @@ fun RegisterScreen(app: GameAppState) {
     var pass by rememberSaveable { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     ScreenScaffold(bg = "castle.png", overlayAlpha = 0.5f) {
-        Card(colors = CardDefaults.cardColors(containerColor = Color(0xCC10263D)), shape = RoundedCornerShape(16.dp)) {
-            Column(Modifier.padding(20.dp).fillMaxWidth(0.85f), horizontalAlignment = Alignment.CenterHorizontally) {
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xCC10263D)), shape = RoundedCornerShape(16.dp), modifier = Modifier.widthIn(max = 460.dp)) {
+            Column(Modifier.padding(20.dp).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Register", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(value = user, onValueChange = { user = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -252,21 +318,159 @@ fun RegisterScreen(app: GameAppState) {
 fun CharacterScreen(app: GameAppState) {
     val p = app.currentProfile
     var isGirl by remember(p?.username) { mutableStateOf((p?.character ?: "Boy").equals("Girl", ignoreCase = true)) }
-    var variant by remember(p?.username) { mutableStateOf((p?.outfitVariant ?: 0).coerceIn(0, 3)) }
+    var selectedVariant by remember(p?.username) { mutableStateOf((p?.outfitVariant ?: 0).coerceIn(0, 3)) }
+    // Highlight follows selection for sensible preview/confirm behavior (preview shown only when a variant is highlighted/selected).
+    var highlightedVariant by remember(p?.username) { mutableStateOf<Int?>((p?.outfitVariant ?: 0).coerceIn(0, 3)) }
+
     ScreenScaffold(bg = "level1.png", overlayAlpha = 0.5f) {
         Text("Choose Your Character", fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FilterChip(selected = !isGirl, onClick = { isGirl = false }, label = { Text("Boy") })
-            FilterChip(selected = isGirl, onClick = { isGirl = true }, label = { Text("Girl") })
+
+        Row(
+            modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            // First section: vertical gender tabs/buttons at very left, then variant buttons.
+            Column(
+                modifier = Modifier.widthIn(min = 120.dp, max = 136.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("Gender", color = Color(0xFF9FD8FF), fontSize = 13.sp)
+                CharacterSelectButton(
+                    text = "Girls",
+                    selected = isGirl,
+                    onClick = { isGirl = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    compact = true
+                )
+                CharacterSelectButton(
+                    text = "Boys",
+                    selected = !isGirl,
+                    onClick = { isGirl = false },
+                    modifier = Modifier.fillMaxWidth(),
+                    compact = true
+                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 132.dp, max = 150.dp)
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("Variants", color = Color(0xFF9FD8FF), fontSize = 13.sp)
+                (0..3).forEach { i ->
+                    CharacterSelectButton(
+                        text = "Variant ${i + 1}",
+                        selected = selectedVariant == i,
+                        highlighted = highlightedVariant == i,
+                        onClick = {
+                            selectedVariant = i
+                            highlightedVariant = i
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        compact = true
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+
+            // Second section: large rectangular preview area for the highlighted/selected variant model.
+            Card(
+                modifier = Modifier.weight(1f).heightIn(min = 320.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xCC10263D))
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val previewVariant = highlightedVariant
+                    if (previewVariant != null) {
+                        val previewName = codeescape.android.render.SpriteAssets.standingOrVariantFile(isGirl, previewVariant)
+                        val ctx = LocalContext.current
+                        val bmp = remember(previewName) {
+                            codeescape.android.render.SpriteAssets.loadBitmap(ctx, previewName)
+                        }
+                        if (bmp != null) {
+                            Column(
+                                modifier = Modifier.fillMaxSize(),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text(
+                                    "${if (isGirl) "Girl" else "Boy"} • Variant ${previewVariant + 1}",
+                                    color = Color(0xFFFFE08A),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                Image(
+                                    bitmap = bmp.asImageBitmap(),
+                                    contentDescription = "Selected character preview",
+                                    modifier = Modifier.fillMaxWidth().weight(1f),
+                                    contentScale = ContentScale.Fit
+                                )
+                            }
+                        } else {
+                            Text(
+                                "Preview unavailable for ${if (isGirl) "Girl" else "Boy"} Variant ${previewVariant + 1}",
+                                color = Color.White.copy(alpha = 0.85f),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    } else {
+                        Text(
+                            "Highlight a variant to preview the character model",
+                            color = Color.White.copy(alpha = 0.8f),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
         }
-        Spacer(Modifier.height(12.dp))
-        Text("Outfit variant")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            (0..3).forEach { i -> FilterChip(selected = variant == i, onClick = { variant = i }, label = { Text("${i + 1}") }) }
-        }
-        Spacer(Modifier.height(18.dp))
-        Button(onClick = { app.saveCharacter(if (isGirl) "Girl" else "Boy", variant) }, modifier = Modifier.fillMaxWidth(0.6f)) { Text("Confirm") }
+
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = { app.saveCharacter(if (isGirl) "Girl" else "Boy", selectedVariant) },
+            modifier = Modifier.fillMaxWidth(0.6f)
+        ) { Text("Confirm") }
+    }
+}
+
+@Composable
+private fun CharacterSelectButton(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    highlighted: Boolean = selected,
+    compact: Boolean = false
+) {
+    val container = when {
+        selected -> Color(0xFF1D6F73)
+        highlighted -> Color(0xFF1D4E6E)
+        else -> Color(0xFF14324D)
+    }
+    val content = if (selected || highlighted) Color.White else Color.White.copy(alpha = 0.85f)
+    Button(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = container, contentColor = content),
+        contentPadding = if (compact) PaddingValues(horizontal = 8.dp, vertical = 8.dp) else ButtonDefaults.ContentPadding
+    ) {
+        Text(
+            text = text,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            softWrap = false,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Clip,
+            fontSize = if (compact) 13.sp else 14.sp
+        )
     }
 }
 
@@ -290,26 +494,36 @@ fun StoryScreen(app: GameAppState) {
             Spacer(Modifier.height(24.dp))
             Text(page.title, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFFFE08A), textAlign = TextAlign.Center)
             Spacer(Modifier.height(16.dp))
-            Card(colors = CardDefaults.cardColors(containerColor = Color(0xCC10263D))) {
-                val range = app.storyHighlightRange
-                val bodyText = if (range != null) {
-                    val s = range.first.coerceIn(0, page.body.length)
-                    val e = range.second.coerceIn(s, page.body.length)
-                    buildAnnotatedString {
-                        append(page.body.substring(0, s))
-                        withStyle(SpanStyle(color = Color(0xFFFFE08A), fontWeight = FontWeight.Bold, background = Color(0x335AF5E6))) {
-                            append(page.body.substring(s, e))
+            Card(colors = CardDefaults.cardColors(containerColor = Color(0xCC10263D)), modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    val range = app.storyHighlightRange
+                    val bodyText = if (range != null) {
+                        val s = range.first.coerceIn(0, page.body.length)
+                        val e = range.second.coerceIn(s, page.body.length)
+                        buildAnnotatedString {
+                            append(page.body.substring(0, s))
+                            withStyle(SpanStyle(color = Color(0xFFFFE08A), fontWeight = FontWeight.Bold, background = Color(0x335AF5E6))) {
+                                append(page.body.substring(s, e))
+                            }
+                            append(page.body.substring(e))
                         }
-                        append(page.body.substring(e))
-                    }
-                } else buildAnnotatedString { append(page.body) }
-                Text(bodyText, modifier = Modifier.padding(16.dp), color = Color.White, lineHeight = 22.sp)
-                if (app.narration.isSupported) {
+                    } else buildAnnotatedString { append(page.body) }
                     Text(
-                        if (app.storyHighlightRange != null) "Narration playing (best-effort highlight)…" else "Narration ready (best-effort).",
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
-                        color = Color(0xFF9FD8FF), fontSize = 12.sp
+                        bodyText,
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        color = Color.White,
+                        lineHeight = 22.sp,
+                        textAlign = TextAlign.Center
                     )
+                    if (app.narration.isSupported) {
+                        Text(
+                            if (app.storyHighlightRange != null) "Narration playing (best-effort highlight)…" else "Narration ready (best-effort).",
+                            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                            color = Color(0xFF9FD8FF),
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
             }
             Spacer(Modifier.height(20.dp))
@@ -323,12 +537,11 @@ fun StoryScreen(app: GameAppState) {
 fun DashboardScreen(app: GameAppState) {
     val p = app.currentProfile
     val session = app.engine.session
-    val displayedXp = session.displayedSavedXp().coerceAtLeast(0)
+    val lifetimeXp = (p?.lifetimeXp ?: try { app.profileRepo.getLifetimeXp(app.currentUsername ?: "") } catch (_: Exception) { session.savedXpBeforeRun }).coerceAtLeast(0)
+    val displayedXp = if (session.showZeroXpAfterCancelledRun) 0 else lifetimeXp
     ScreenScaffold(bg = "castle.png", overlayAlpha = 0.45f) {
         Text("CODE ESCAPE", fontSize = 30.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFFFD54A))
-        Spacer(Modifier.height(6.dp))
         Text("WELCOME, ${(app.currentUsername ?: "PLAYER").uppercase()}", color = Color(0xFFF2EFE2), fontSize = 15.sp)
-        Spacer(Modifier.height(12.dp))
         Card(colors = CardDefaults.cardColors(containerColor = Color(0xE6051C43)), shape = RoundedCornerShape(18.dp)) {
             Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("${(p?.character ?: "BOY").uppercase()}", fontSize = 22.sp, fontWeight = FontWeight.Bold,
@@ -337,16 +550,14 @@ fun DashboardScreen(app: GameAppState) {
                 Text("★  XP: $displayedXp", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD54A))
             }
         }
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(8.dp))
         Text("MAIN MENU", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD54A))
-        Spacer(Modifier.height(14.dp))
-        Button(onClick = { app.startLessonFromBeginning() }, modifier = Modifier.fillMaxWidth(0.7f)) { Text("▶  PLAY") }
-        Spacer(Modifier.height(10.dp))
-        OutlinedButton(onClick = { app.openProfile() }, modifier = Modifier.fillMaxWidth(0.7f)) { Text("PROFILE") }
-        Spacer(Modifier.height(10.dp))
+        val menuWidth = Modifier.fillMaxWidth().widthIn(max = 420.dp)
+        Button(onClick = { app.startLessonFromBeginning() }, modifier = menuWidth) { Text("▶  PLAY") }
+        OutlinedButton(onClick = { app.openProfile() }, modifier = menuWidth) { Text("PROFILE") }
         OutlinedButton(
             onClick = { app.openLogoutDialog() },
-            modifier = Modifier.fillMaxWidth(0.7f),
+            modifier = menuWidth,
             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF9A9A))
         ) { Text("EXIT") }
     }
@@ -387,6 +598,7 @@ fun ProfileScreen(app: GameAppState) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun QuestionScreen(app: GameAppState) {
     val q = app.currentQuestion()
@@ -394,7 +606,7 @@ fun QuestionScreen(app: GameAppState) {
     val meta = LevelMetadata.of(level)
 
     LaunchedEffect(app.screen, q.text, app.answered, app.awaitingAdvance, app.exitDialogShown, app.isResumed) {
-        while (!app.answered && !app.awaitingAdvance && !app.exitDialogShown &&
+        while (FlowTransitions.shouldPauseInteractiveQuestion(app.screen, app.answered, app.awaitingAdvance) && !app.exitDialogShown &&
             app.screen == FlowState.QUESTION && app.questionTimeLeft > 0
         ) {
             delay(1000)
@@ -411,13 +623,23 @@ fun QuestionScreen(app: GameAppState) {
         BackgroundImage(meta.backgroundImage, Modifier.fillMaxSize())
         Box(Modifier.fillMaxSize().background(Color(0x9910212F)))
         Column(Modifier.fillMaxSize().padding(16.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            @OptIn(ExperimentalFoundationApi::class)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = { app.cheatCompleteCurrentStageForTesting() }
+                    ),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text("LEVEL ${app.engine.level} • QUESTION ${app.engine.questionIndex + 1} / ${GameConfig.QUESTIONS_PER_LEVEL}", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Text("❤ ${app.engine.hearts}   XP ${app.engine.xp}", color = Color(0xFFFFE08A), fontWeight = FontWeight.SemiBold)
                 Text("${app.questionTimeLeft}s", color = if (app.questionTimeLeft <= 5) Color(0xFFFF8080) else Color(0xFF5AF5E6), fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.height(10.dp))
-            val denom = (if (q.syntax) GameConfig.SYNTAX_SECONDS else GameConfig.MCQ_SECONDS).coerceAtLeast(1)
+            val denom = app.questionTimeLimitSeconds(q).coerceAtLeast(1)
             LinearProgressIndicator(progress = { (app.questionTimeLeft.toFloat() / denom).coerceIn(0f,1f) }, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(14.dp))
             Card(colors = CardDefaults.cardColors(containerColor = Color(0xE610263D)), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth().weight(1f, fill = false)) {
@@ -435,24 +657,72 @@ fun QuestionScreen(app: GameAppState) {
                             singleLine = false,
                             minLines = 2
                         )
+                        Spacer(Modifier.height(8.dp))
+                        val symbolKeys = listOf(
+                            "<", ">", "=", "/", "{", "}", "(", ")", "[", "]",
+                            "\"", "'", ";", ":", ".", ",", "!", "&", "|",
+                            "+", "-", "*", "_", "#"
+                        )
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            symbolKeys.forEach { sym ->
+                                OutlinedButton(
+                                    onClick = { app.syntaxInput += sym },
+                                    enabled = !locked,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 34.dp)
+                                ) {
+                                    Text(sym, fontSize = 14.sp)
+                                }
+                            }
+                        }
                         Spacer(Modifier.height(10.dp))
                         Button(onClick = { app.submitSyntax() }, enabled = !locked) { Text("Submit") }
                     } else {
                         val answers = q.answers ?: emptyArray()
-                        answers.forEachIndexed { idx, ans ->
-                            val isCorrect = idx == q.correct
-                            val showResult = app.answered
-                            val color = when {
-                                !showResult -> Color(0xFF1D4E6E)
-                                isCorrect -> Color(0xFF2E7D32)
-                                else -> Color(0xFF5A3A3A)
+                        val answerPairs = answers.mapIndexed { idx, ans -> idx to (ans ?: "") }.chunked(2)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            answerPairs.forEach { rowItems ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    rowItems.forEach { (idx, ans) ->
+                                        val isCorrect = idx == q.correct
+                                        val showResult = app.answered
+                                        val color = when {
+                                            !showResult -> Color(0xFF1D4E6E)
+                                            isCorrect -> Color(0xFF2E7D32)
+                                            else -> Color(0xFF5A3A3A)
+                                        }
+                                        Button(
+                                            onClick = { app.submitChoice(idx) },
+                                            enabled = !locked,
+                                            modifier = Modifier.weight(1f).heightIn(min = 52.dp),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = color,
+                                                contentColor = Color.White,
+                                                disabledContainerColor = color,
+                                                disabledContentColor = Color.White
+                                            ),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
+                                        ) {
+                                            Text(
+                                                ans,
+                                                textAlign = TextAlign.Center,
+                                                modifier = Modifier.fillMaxWidth(),
+                                                color = Color.White
+                                            )
+                                        }
+                                    }
+                                    if (rowItems.size == 1) {
+                                        Spacer(Modifier.weight(1f))
+                                    }
+                                }
                             }
-                            Button(
-                                onClick = { app.submitChoice(idx) },
-                                enabled = !locked,
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = color)
-                            ) { Text(ans ?: "", textAlign = TextAlign.Start, modifier = Modifier.fillMaxWidth()) }
                         }
                     }
                     if (app.answered) {
@@ -523,35 +793,104 @@ fun EndingScreen(app: GameAppState) {
     val isGirl = (p?.character ?: "Boy").equals("Girl", ignoreCase = true)
     val variant = (p?.outfitVariant ?: 0).coerceIn(0, 3)
     Box(Modifier.fillMaxSize()) {
-        AssetEndingScene(isGirl = isGirl, variantIndex = variant, onOpened = { app.onEndingChestOpened() })
-        Column(Modifier.align(Alignment.TopCenter).padding(top = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("VICTORY POSE READY!", color = Color(0xFFFFE08A), fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
-            Text(if (app.endingChestOpened) "Treasure unlocked" else "Tap the key to open the vault", color = Color.White)
+        AssetEndingScene(
+            isGirl = isGirl,
+            variantIndex = variant,
+            initialChestOpened = app.endingChestOpened || app.endingTreasureDialogShown || app.endingXpDialogShown,
+            onOpened = { app.onEndingChestOpened() }
+        )
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 12.dp, start = 12.dp, end = 12.dp)
+                .background(Color(0x9908121E), RoundedCornerShape(12.dp))
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("VICTORY POSE READY!", color = Color(0xFFFFE08A), fontWeight = FontWeight.ExtraBold, fontSize = 20.sp, textAlign = TextAlign.Center)
+            Text(
+                if (app.endingChestOpened) "Treasure unlocked" else "Tap the key to open the vault",
+                color = Color.White,
+                textAlign = TextAlign.Center
+            )
         }
 
         if (app.endingTreasureDialogShown) {
+            val ctx = LocalContext.current
+            val noteBmp = remember("treasure_note.png") {
+                try { ctx.assets.open("treasure_note.png").use { BitmapFactory.decodeStream(it) } } catch (_: Exception) { null }
+            }
             AlertDialog(
                 onDismissRequest = { /* modal parity */ },
                 confirmButton = { Button(onClick = { app.onTreasureDialogContinue() }) { Text("CONTINUE") } },
-                title = { Text("YOU FOUND THE FINAL TREASURE!") },
+                title = { Text("YOU FOUND THE FINAL TREASURE!", textAlign = TextAlign.Center) },
                 text = {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("The vault opens and reveals the final note of your escape.")
-                        Spacer(Modifier.height(8.dp))
-                        BackgroundImage("treasure_note.png", modifier = Modifier.fillMaxWidth().height(180.dp), alpha = 1f)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState()),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "The vault opens and reveals the final note of your escape.",
+                            textAlign = TextAlign.Center,
+                            color = Color.White
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        if (noteBmp != null) {
+                            Image(
+                                bitmap = noteBmp.asImageBitmap(),
+                                contentDescription = "Treasure note",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 180.dp, max = 420.dp),
+                                contentScale = ContentScale.Fit
+                            )
+                        } else {
+                            BackgroundImage("treasure_note.png", modifier = Modifier.fillMaxWidth().height(180.dp), alpha = 1f)
+                        }
                     }
                 }
             )
         }
         if (app.endingXpDialogShown) {
-            val lifetimeXp = (app.currentProfile?.lifetimeXp ?: app.endingFinalXp).coerceAtLeast(0)
+            val lifetimeXp = (app.currentProfile?.lifetimeXp
+                ?: app.profileRepo.getLifetimeXp(app.currentUsername ?: "")).coerceAtLeast(0)
+            val finalRunXp = app.engine.xp.coerceAtLeast(app.endingFinalXp).coerceAtLeast(0)
             AlertDialog(
                 onDismissRequest = { /* modal parity */ },
                 confirmButton = { Button(onClick = { app.onEndingXpMenu() }) { Text("MENU") } },
                 dismissButton = { OutlinedButton(onClick = { app.onEndingXpRetry() }) { Text("TRY AGAIN") } },
-                title = { Text("LEVELS COMPLETED!", color = Color(0xFFFFD54A), fontWeight = FontWeight.ExtraBold) },
+                title = { Text("LEVELS COMPLETED!", color = Color(0xFFFFD54A), fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center) },
                 text = {
-                    Text("XP collected this login: $lifetimeXp", color = Color(0xFFF2EFE2), fontWeight = FontWeight.SemiBold)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState()),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "XP collected this login: $lifetimeXp",
+                            color = Color(0xFFF2EFE2),
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Final run XP: $finalRunXp",
+                            color = Color(0xFFFFE08A),
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Your progress has been saved. You can return to the menu or try again.",
+                            color = Color.White.copy(alpha = 0.9f),
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
             )
         }

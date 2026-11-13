@@ -5,6 +5,8 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.util.function.Function;
 
+import codeescape.desktop.scheduler.SwingScheduler;
+
 public class EndingScene extends JPanel {
     private static final int KEY_WAITING = 0, KEY_FLYING = 1, OPENING = 2, OPENED = 3;
     private final BufferedImage runSheet;
@@ -14,6 +16,7 @@ public class EndingScene extends JPanel {
     private final BufferedImage keyImage;
     private final JLabel instructions;
     private final javax.swing.Timer timer;
+    private final SwingScheduler scheduler;
     private final Function<String, BufferedImage> load;
     private final Runnable onTreasureOpen;
     private final String victoryPoseMissingLabel;
@@ -33,7 +36,17 @@ public class EndingScene extends JPanel {
                        String runFile, String standingFile, String victoryFile,
                        JLabel instructions, Runnable onTreasureOpen,
                        String victoryPoseMissingLabel, Color gold) {
+        this(load, framesLoader, runFile, standingFile, victoryFile, instructions, onTreasureOpen, victoryPoseMissingLabel, gold, null);
+    }
+
+    public EndingScene(Function<String, BufferedImage> load,
+                       Function<String, BufferedImage[]> framesLoader,
+                       String runFile, String standingFile, String victoryFile,
+                       JLabel instructions, Runnable onTreasureOpen,
+                       String victoryPoseMissingLabel, Color gold,
+                       SwingScheduler scheduler) {
         this.load = load;
+        this.scheduler = scheduler;
         this.onTreasureOpen = onTreasureOpen;
         this.victoryPoseMissingLabel = victoryPoseMissingLabel == null ? "VICTORY POSE NOT FOUND" : victoryPoseMissingLabel;
         this.gold = gold == null ? new Color(255, 209, 102) : gold;
@@ -59,19 +72,14 @@ public class EndingScene extends JPanel {
                 }
             }
         });
-        timer = new javax.swing.Timer(30, e -> tick());
+        timer = scheduler != null ? scheduler.repeating(30, this::tick) : new javax.swing.Timer(30, e -> tick());
+        if (timer != null) timer.stop();
     }
 
     public void start() {
         stageStarted = System.currentTimeMillis();
-        int w = Math.max(1, getWidth());
-        int h = Math.max(1, getHeight());
-        int characterHeight = Math.min((int) (h * .78), 405);
-        int characterWidth = victoryPose == null ? Math.max(58, (int) (characterHeight * .48))
-                : Math.max(90, (int) (characterHeight * victoryPose.getWidth() / (double) victoryPose.getHeight()));
-        runnerX = w / 2.0 - characterWidth / 2.0;
         instructions.setText("YOUR VICTORY POSE IS READY! CLICK THE KEY TO UNLOCK THE VAULT.");
-        timer.start();
+        if (timer != null && !timer.isRunning()) timer.start();
     }
 
     private void tick() {
@@ -86,14 +94,18 @@ public class EndingScene extends JPanel {
             double openT = Math.min(1.0, elapsed / 760.0);
             lidAngle = openT * openT * (3.0 - 2.0 * openT);
             if (lidAngle >= 1.0) {
-                stage = OPENED; timer.stop();
+                stage = OPENED; if (scheduler != null) scheduler.stop(timer); else if (timer != null) timer.stop();
                 instructions.setText("THE VAULT IS OPEN! TREASURE UNLOCKED.");
                 repaint();
                 if (!completionShown) {
                     completionShown = true;
-                    javax.swing.Timer popup = new javax.swing.Timer(550, ev -> { if (onTreasureOpen != null) onTreasureOpen.run(); });
-                    popup.setRepeats(false);
-                    popup.start();
+                    Runnable open = () -> { if (onTreasureOpen != null) onTreasureOpen.run(); };
+                    if (scheduler != null) scheduler.once(550, open);
+                    else {
+                        javax.swing.Timer popup = new javax.swing.Timer(550, ev -> open.run());
+                        popup.setRepeats(false);
+                        popup.start();
+                    }
                 }
                 return;
             }
@@ -101,14 +113,34 @@ public class EndingScene extends JPanel {
         repaint();
     }
 
+    private Rectangle characterBounds(int w, int h) {
+        BufferedImage finalCharacter = victoryPose != null ? victoryPose : standing;
+        int maxVictoryW = Math.max(90, (int) (w * 0.22));
+        int maxVictoryH = Math.max(140, (int) (h * 0.46));
+        int victoryW, victoryH;
+        if (finalCharacter != null) {
+            double victoryScale = Math.min(maxVictoryW / (double) finalCharacter.getWidth(),
+                                           maxVictoryH / (double) finalCharacter.getHeight());
+            victoryW = Math.max(1, (int) (finalCharacter.getWidth() * victoryScale));
+            victoryH = Math.max(1, (int) (finalCharacter.getHeight() * victoryScale));
+        } else {
+            victoryW = maxVictoryW;
+            victoryH = maxVictoryH;
+        }
+        int victoryX = Math.max((int) (w * 0.52), w - victoryW - (int) (w * 0.06));
+        int victoryY = h - victoryH - (int) (h * 0.03);
+        return new Rectangle(victoryX, victoryY, victoryW, victoryH);
+    }
+
     private Rectangle keyBounds() {
         int w = getWidth(), h = getHeight();
-        int kw = Math.max(48, (int) (w * 0.09)), kh = Math.max(30, (int) (h * 0.09));
-        int characterHeight = Math.min((int) (h * .78), 405);
-        int x = w / 2 - kw / 2;
+        Rectangle c = characterBounds(w, h);
+        int kw = Math.max(42, (int) (w * 0.075)), kh = Math.max(26, (int) (h * 0.075));
         int popLift = stage == KEY_WAITING
-                ? (int) (Math.sin(Math.min(1.0, (System.currentTimeMillis() - stageStarted) / 420.0) * Math.PI / 2.0) * Math.min(30, h * 0.07)) : 0;
-        int y = h - characterHeight - 14 - 52 - popLift;
+                ? (int) (Math.sin(Math.min(1.0, (System.currentTimeMillis() - stageStarted) / 420.0) * Math.PI / 2.0) * Math.min(18, h * 0.04)) : 0;
+        // Place key on the character (near upper body/hand area) so it does not cover the chest.
+        int x = Math.max(8, Math.min(w - kw - 8, c.x + (int) (c.width * 0.18)));
+        int y = Math.max(8, Math.min(h - kh - 8, c.y + (int) (c.height * 0.28) - popLift));
         return new Rectangle(x, y, kw, kh);
     }
 
@@ -128,11 +160,12 @@ public class EndingScene extends JPanel {
         BufferedImage closedChest = load.apply("treasure_chest_real.png");
         BufferedImage chestBody = load.apply("treasure_chest_body.png");
         BufferedImage chestLid = load.apply("treasure_chest_lid.png");
-        int vw = Math.min(Math.max(145, (int) (w * .25)), Math.max(145, w - 56));
-        int vh = closedChest == null ? Math.max(125, (int) (h * .30))
-                : Math.max(125, (int) (vw * closedChest.getHeight() / (double) closedChest.getWidth()));
+        int topSafe = Math.max(84, (int) (h * 0.16)); // keep space for top labels/instructions
+        int vw = Math.min(Math.max(140, (int) (w * .24)), Math.max(140, w - 48));
+        int vh = closedChest == null ? Math.max(120, (int) (h * .28))
+                : Math.max(120, (int) (vw * closedChest.getHeight() / (double) closedChest.getWidth()));
         int vx = (w - vw) / 2;
-        int vy = Math.max(8, (int) (h * .035));
+        int vy = topSafe;
         int lockX = vx + vw / 2;
         int lockY = vy + (int) (vh * .49);
         if (stage == OPENING || stage == OPENED) {
@@ -175,23 +208,18 @@ public class EndingScene extends JPanel {
             g.setColor(new Color(50, 30, 15));
             g.fillOval(lockX - 4, lockY - 2, 8, 8);
         }
-        int maxVictoryW = Math.max(110, (int) (w * 0.34));
-        int maxVictoryH = Math.max(180, (int) (h * 0.78));
+
         BufferedImage finalCharacter = victoryPose;
         if (finalCharacter != null) {
-            double victoryScale = Math.min(maxVictoryW / (double) finalCharacter.getWidth(),
-                                           maxVictoryH / (double) finalCharacter.getHeight());
-            int victoryW = Math.max(1, (int) (finalCharacter.getWidth() * victoryScale));
-            int victoryH = Math.max(1, (int) (finalCharacter.getHeight() * victoryScale));
-            int victoryX = (w - victoryW) / 2;
-            int victoryY = h - victoryH - 5;
-            g.drawImage(finalCharacter, victoryX, victoryY, victoryW, victoryH, null);
+            Rectangle c = characterBounds(w, h);
+            // Smaller character placed bottom-right so it does not cover the centered chest.
+            g.drawImage(finalCharacter, c.x, c.y, c.width, c.height, null);
             g.setColor(new Color(255, 226, 125, 225));
-            for (int i = 0; i < 16; i++) {
-                double a = i * Math.PI / 8.0;
-                int sx = w / 2 + (int) (Math.cos(a) * victoryW * 0.62);
-                int sy = victoryY + victoryH / 3 + (int) (Math.sin(a) * victoryH * 0.24);
-                g.fillOval(sx, sy, 5, 5);
+            for (int i = 0; i < 12; i++) {
+                double a = i * Math.PI / 6.0;
+                int sx = c.x + c.width / 2 + (int) (Math.cos(a) * c.width * 0.52);
+                int sy = c.y + c.height / 3 + (int) (Math.sin(a) * c.height * 0.20);
+                g.fillOval(sx, sy, 4, 4);
             }
         } else {
             g.setColor(new Color(255, 225, 150));
@@ -200,6 +228,7 @@ public class EndingScene extends JPanel {
             FontMetrics fm = g.getFontMetrics();
             g.drawString(missing, Math.max(12, (w - fm.stringWidth(missing)) / 2), h / 2);
         }
+
         if (stage == KEY_WAITING || stage == KEY_FLYING) {
             Rectangle b = keyBounds();
             int kx = b.x, ky = b.y;
@@ -210,8 +239,10 @@ public class EndingScene extends JPanel {
                 kx = (int) (keyFlightStartX + (tx - keyFlightStartX) * eased);
                 ky = (int) (keyFlightStartY + (ty - keyFlightStartY) * eased);
             }
-            if (keyImage != null) drawImageFit(g, keyImage, kx, ky, Math.max(50, (int) (w * .10)), Math.max(34, (int) (h * .10)));
-            else { g.setColor(gold); g.setFont(new Font("SansSerif", Font.BOLD, 40)); g.drawString("KEY", kx, ky + 35); }
+            int kw = Math.max(42, (int) (w * 0.075));
+            int kh = Math.max(26, (int) (h * 0.075));
+            if (keyImage != null) drawImageFit(g, keyImage, kx, ky, kw, kh);
+            else { g.setColor(gold); g.setFont(new Font("SansSerif", Font.BOLD, 32)); g.drawString("KEY", kx, ky + 28); }
             if (stage == KEY_WAITING) { g.setColor(new Color(255, 220, 90)); g.setStroke(new BasicStroke(2)); g.drawRoundRect(b.x - 4, b.y - 4, b.width + 8, b.height + 8, 12, 12); }
         }
         g.dispose();

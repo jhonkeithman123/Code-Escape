@@ -57,7 +57,6 @@ public class CodeEscapeApp extends JFrame {
     private int savedXp = 0;
     private int secondsLeft = GameConfig.MCQ_SECONDS;
 
-    private javax.swing.Timer questionTimer;
     private final codeescape.desktop.scheduler.SwingScheduler uiScheduler = new codeescape.desktop.scheduler.SwingScheduler();
     private codeescape.desktop.ui.question.QuestionHudController questionHudController;
     // Audio/music and narration ownership lives in the port adapters (DesktopAudioAdapter /
@@ -117,18 +116,30 @@ public class CodeEscapeApp extends JFrame {
     private final codeescape.core.flow.Navigator flowNavigator = new codeescape.core.flow.Navigator() {
         @Override public void navigate(codeescape.core.flow.FlowState state) { navigate(state, session().level); }
         @Override public void navigate(codeescape.core.flow.FlowState state, int level) {
-            if (state == codeescape.core.flow.FlowState.QUESTION) {
-                startQuestion();
-            } else {
-                showScreen(codeescape.core.flow.FlowTransitions.screenName(state));
+            if (state == null) return;
+            switch (state) {
+                case QUESTION:
+                    startQuestion();
+                    return;
+                case DASHBOARD:
+                    refreshDashboard();
+                    showScreen(codeescape.core.flow.FlowTransitions.screenName(state));
+                    return;
+                case PROFILE:
+                    refreshProfile();
+                    showScreen(codeescape.core.flow.FlowTransitions.screenName(state));
+                    return;
+                default:
+                    showScreen(codeescape.core.flow.FlowTransitions.screenName(state));
             }
         }
     };
 
-    /** Routes app-level flow events through the core transition contract when a target is defined. */
+    /** Routes app-level flow events through the core transition contract when a target is resolved. */
     private void dispatch(codeescape.core.flow.FlowEvent event) {
-        codeescape.core.flow.FlowState target = codeescape.core.flow.FlowTransitions.targetFor(event);
-        if (target != null) flowNavigator.navigate(target);
+        // Core resolves unambiguous and selected context-sensitive transitions (cross-frontend contract).
+        // Desktop navigator owns screen-specific effects (e.g. QUESTION -> startQuestion) for parity.
+        codeescape.core.flow.FlowTransitions.dispatch(flowNavigator, null, event);
     }
 
     /** Music playing state is owned by the audio adapter (AudioPort); no mirrored clip reference. */
@@ -203,6 +214,7 @@ public class CodeEscapeApp extends JFrame {
     root.add(logoutScreen(), "LOGOUT");
 
     setContentPane(root);
+    installDemoCheatHotkey();
 }
 
     private void showScreen(String name) {
@@ -630,7 +642,18 @@ public class CodeEscapeApp extends JFrame {
     }
 
     private void refreshMainMenuXp() {
+        syncSavedXpFromRepository();
         if (mainMenuXpLabel != null) mainMenuXpLabel.setText("★  XP: " + (session().showZeroXpAfterCancelledRun ? 0 : savedXp));
+    }
+
+    private void syncSavedXpFromRepository() {
+        try {
+            String u = session() != null ? session().username : username;
+            if (u == null || u.trim().isEmpty()) return;
+            int repoXp = profileRepository.getLifetimeXp(u);
+            savedXp = Math.max(0, repoXp);
+            scores.put(u, savedXp);
+        } catch (Exception ignored) {}
     }
 
     private JButton menuGameButton(String text, Color accent) {
@@ -814,6 +837,8 @@ public class CodeEscapeApp extends JFrame {
     }
 
     if (dashboardXpLabel != null) {
+        syncSavedXpFromRepository();
+        if (session() != null) session().savedXpBeforeRun = Math.max(0, savedXp);
         int displayedXp = session().showZeroXpAfterCancelledRun ? 0 : savedXp;
         dashboardXpLabel.setText("★  XP: " + displayedXp);
         dashboardXpLabel.setForeground(GOLD);
@@ -853,7 +878,9 @@ public class CodeEscapeApp extends JFrame {
             @Override public String wrapStoryHtml(String text, int maxChars) { return CodeEscapeApp.this.wrapStoryHtml(text, maxChars); }
             @Override public void speakStoryKaraoke(String text, JLabel label) { CodeEscapeApp.this.speakStoryKaraoke(text, label); }
             @Override public void stopStorySpeech() { CodeEscapeApp.this.stopStorySpeech(); }
-            @Override public void setActiveStory(JLabel story, java.util.List<int[]> ranges) { /* karaoke state owned by the story screen builder */ }
+            @Override public void setActiveStory(JLabel story, java.util.List<int[]> ranges) {
+                codeescape.desktop.ui.screens.StoryScreenBuilder.register(story, storyText, ranges, getWidth() > 500 ? 36 : 23);
+            }
         }, titleText, storyText, buttonText, background, nextAction);
     }
     private String htmlEscape(String text) {
@@ -957,9 +984,13 @@ public class CodeEscapeApp extends JFrame {
     // ==================== STORY TEXT-TO-SPEECH / KARAOKE ====================
     // Wired through the NarrationPort contract (WindowsNarrationAdapter) with UI callbacks for parity.
     // Narration process/thread/generation ownership lives in the adapter.
+    private JLabel activeStoryLabel;
+
     public void speakStoryKaraoke(String text, JLabel label) {
         stopStorySpeech();
         final java.util.List<int[]> ranges = buildStoryRanges(text);
+        activeStoryLabel = label;
+        codeescape.desktop.ui.screens.StoryScreenBuilder.clearHighlight(label);
 
         if (!narrationAdapter.isSupported()) {
             if (label != null) label.setText(wrapStoryHtml(text, label.getWidth() > 500 ? 36 : 23));
@@ -970,22 +1001,30 @@ public class CodeEscapeApp extends JFrame {
         if (storyMusicWasPlaying) audioAdapter.stopMusic();
         narrationPort.speakStory(text, new NarrationCallback() {
             @Override public void onLine(int index, String t, java.util.List<int[]> r) {
-                showStoryLyric(label, t, index, r);
+                codeescape.desktop.ui.screens.StoryScreenBuilder.highlightLine(label, index);
+            }
+            @Override public void onRange(int start, int end) {
+                codeescape.desktop.ui.screens.StoryScreenBuilder.highlightRange(label, start, end);
             }
             @Override public void onComplete() {
                 SwingUtilities.invokeLater(() -> {
-                    if (label != null) label.setText("<html><div style='text-align:center;'>Story complete!</div></html>");
+                    codeescape.desktop.ui.screens.StoryScreenBuilder.clearHighlight(label);
                 });
                 if (storyMusicWasPlaying && audioAdapter.isEnabled()) {
                     audioAdapter.startBackgroundMusic();
                 }
                 storyMusicWasPlaying = false;
+                activeStoryLabel = null;
             }
         });
     }
 
     public void stopStorySpeech(){
         narrationPort.stop();
+        if (activeStoryLabel != null) {
+            codeescape.desktop.ui.screens.StoryScreenBuilder.clearHighlight(activeStoryLabel);
+            activeStoryLabel = null;
+        }
         if (storyMusicWasPlaying && audioAdapter.isEnabled()) {
             audioAdapter.startBackgroundMusic();
         }
@@ -1040,7 +1079,7 @@ private JPanel endingScreen() {
             endingRunner, endingStanding, endingVictory, shell.instructions,
             this::openTreasureChest,
             "VICTORY POSE NOT FOUND: " + victoryPoseFile(endingCharacter, endingVariant),
-            GOLD);
+            GOLD, uiScheduler);
     shell.panel.add(scene, BorderLayout.CENTER);
     SwingUtilities.invokeLater(scene::start);
     return shell.panel;
@@ -1102,7 +1141,7 @@ private void openTreasureChest() {
         xpLabel = refs.hud.xpLabel;
         questionHudRefs = refs.hud;
         questionScreenRefs = refs;
-        questionHudController = new codeescape.desktop.ui.question.QuestionHudController(questionHudRefs, this::handleTimeout);
+        questionHudController = new codeescape.desktop.ui.question.QuestionHudController(questionHudRefs, this::handleTimeout, uiScheduler);
         questionHudController.setAcceptingAnswer(acceptingAnswer);
         questionHudController.setSecondsLeft(secondsLeft);
         return questionBackground;
@@ -1110,7 +1149,6 @@ private void openTreasureChest() {
 
     private void stopQuestionTimer() {
         if (questionHudController != null) questionHudController.stop();
-        if (questionTimer != null) questionTimer.stop();
     }
     /** Central accepting-answer state: keeps the HUD controller and legacy field in sync. */
     private void setAcceptingAnswer(boolean value) {
@@ -1167,10 +1205,13 @@ private void openTreasureChest() {
             questionHudController.restart(currentSecondsLeft(), GameConfig.QUESTION_TICK_MS,
                     this::syncQuestionTimerUiFromController,
                     () -> { syncQuestionTimerUiFromController(); handleTimeout(); });
-            questionTimer = null;
             return;
         }
-        startLegacyQuestionTimer();
+        // Defensive fallback if screen/controller not yet initialized.
+        if (timerLabel != null) {
+            timerLabel.setText(timerLabelText());
+            timerLabel.setForeground(timerColor());
+        }
     }
 
     private void startQuestion() {
@@ -1189,8 +1230,9 @@ private void openTreasureChest() {
         setAcceptingAnswer(true);
         setSecondsLeft(lessonEngine.questionTimeSeconds());
         boolean syntax = q.syntax;
-        String counter = "LEVEL " + session().level + " • QUESTION " + (session().questionIndex + 1) + " / " + GameConfig.QUESTIONS_PER_LEVEL;
-        String questionHtml = "<html><center>" + q.text + "</center></html>";
+        String counter = codeescape.desktop.ui.screens.QuestionScreen.formatCounter(
+                session().level, session().questionIndex, GameConfig.QUESTIONS_PER_LEVEL);
+        String questionHtml = codeescape.desktop.ui.screens.QuestionScreen.formatQuestionHtml(q.text);
         codeescape.desktop.ui.screens.QuestionScreen.Refs refs = questionScreenRefs;
         if (refs == null) {
             // Defensive fallback: rebuild refs from legacy fields (pre-extraction parity path).
@@ -1220,44 +1262,83 @@ private void openTreasureChest() {
             questionHudController.restart(startSeconds, GameConfig.QUESTION_TICK_MS,
                     this::syncQuestionTimerUiFromController,
                     () -> { syncQuestionTimerUiFromController(); handleTimeout(); });
-            questionTimer = null;
             return;
         }
-        startLegacyQuestionTimer();
-    }
-
-    /** Legacy fallback timer loop retained for parity when the HUD controller is unavailable. */
-    private void startLegacyQuestionTimer() {
-        if (timerLabel == null) return;
-        timerLabel.setText(timerLabelText());
-        timerLabel.setForeground(secondsLeft <= 5 ? RED : GOLD);
-        questionTimer = uiScheduler.repeating(GameConfig.QUESTION_TICK_MS, () -> {
-            if (!acceptingAnswer) return;
-            secondsLeft--;
-            if (questionHudController != null) questionHudController.setSecondsLeft(secondsLeft);
+        // Defensive fallback if screen/controller not yet initialized.
+        if (timerLabel != null) {
             timerLabel.setText(timerLabelText());
-            timerLabel.setForeground(secondsLeft <= 5 ? RED : GOLD);
-            if (secondsLeft <= 0) { stopQuestionTimer(); handleTimeout(); }
-        });
-        questionTimer.start();
+            timerLabel.setForeground(timerColor());
+        }
     }
 
     private void syncQuestionTimerUiFromController() {
-        if (questionHudController != null) secondsLeft = questionHudController.getSecondsLeft();
-        if (timerLabel != null) {
+        if (questionHudController != null) {
+            secondsLeft = questionHudController.getSecondsLeft();
+            questionHudController.syncTimerHud(timerLabelText(), timerColor());
+        } else if (timerLabel != null) {
             timerLabel.setText(timerLabelText());
-            timerLabel.setForeground(secondsLeft <= 5 ? RED : GOLD);
+            timerLabel.setForeground(timerColor());
         }
     }
 
     /** Formats the countdown label; prefix is the original legacy string preserved byte-for-byte. */
-    private String timerLabelText() { return "⏱ " + secondsLeft + "s"; }
+    private String timerLabelText() {
+        return codeescape.desktop.ui.question.QuestionHudController.formatTimerLabel(secondsLeft);
+    }
+
+    private Color timerColor() {
+        return codeescape.desktop.ui.question.QuestionHudController.timerColor(secondsLeft, GOLD, RED);
+    }
 
     private void handleAnswerResult(codeescape.core.engine.LessonEngine.AnswerResult result, String heading, String big, String detail, Color accent, boolean feedbackCorrect) {
         updateHud();
         refreshDashboard();
         playFeedbackSound(feedbackCorrect);
         showGamePopup(heading, big, detail, accent);
+        if (codeescape.core.flow.FlowTransitions.shouldCommitSession(result)) {
+            commitSessionXp();
+        }
+        codeescape.core.flow.FlowState next = codeescape.core.flow.FlowTransitions.nextAfterAnswer(result, session().level);
+        if (next == codeescape.core.flow.FlowState.QUESTION) {
+            loadQuestion();
+        } else {
+            flowNavigator.navigate(next, session().level);
+        }
+    }
+
+    private boolean isDemoAccountActive() {
+        return username != null && "demo".equalsIgnoreCase(username.trim());
+    }
+
+    private void installDemoCheatHotkey() {
+        javax.swing.JRootPane rp = getRootPane();
+        if (rp == null) return;
+        javax.swing.InputMap im = rp.getInputMap(javax.swing.JComponent.WHEN_IN_FOCUSED_WINDOW);
+        javax.swing.ActionMap am = rp.getActionMap();
+        im.put(javax.swing.KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_F3, 0), "demoCheatCompleteStage");
+        am.put("demoCheatCompleteStage", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) {
+                triggerDemoCheatCompleteStage();
+            }
+        });
+    }
+
+    /** Demo-only testing cheat (F3): complete current stage perfectly and jump to narration/ending flow. */
+    private void triggerDemoCheatCompleteStage() {
+        if (!isDemoAccountActive()) return;
+        if (session() == null || session().sessionCommitted) return;
+        // Only meaningful during an active question stage.
+        if (questionBackground == null || !questionBackground.isShowing()) return;
+
+        stopQuestionTimer();
+        setAcceptingAnswer(false);
+        setAnswerInputsEnabled(false);
+        if (questionHudController != null) questionHudController.setAcceptingAnswer(false);
+
+        codeescape.core.engine.LessonEngine.AnswerResult result = lessonEngine.cheatCompleteCurrentStagePerfectly();
+        updateHud();
+        refreshDashboard();
+
         if (codeescape.core.flow.FlowTransitions.shouldCommitSession(result)) {
             commitSessionXp();
         }
@@ -1307,13 +1388,16 @@ private void openTreasureChest() {
     private void updateHud() {
         String hearts = heartsText();
         String xpText = "⭐ XP: " + session().xp;
-        String timerText = timerLabelText();
         if (questionHudController != null && questionHudRefs != null) {
-            questionHudController.applyHud(hearts, xpText, timerText, timerLabel != null ? timerLabel.getForeground() : null);
+            questionHudController.setSecondsLeft(currentSecondsLeft());
+            questionHudController.renderHud(hearts, xpText, GOLD, RED);
         } else {
             if (heartsLabel != null) heartsLabel.setText(hearts);
             if (xpLabel != null) xpLabel.setText(xpText);
-            if (timerLabel != null) timerLabel.setText(timerText);
+            if (timerLabel != null) {
+                timerLabel.setText(timerLabelText());
+                timerLabel.setForeground(timerColor());
+            }
         }
         if (dashboardXpLabel != null) dashboardXpLabel.setText("★  XP: " + (session().showZeroXpAfterCancelledRun ? 0 : savedXp));
     }
@@ -1325,14 +1409,14 @@ private void openTreasureChest() {
 
         String runnerFile = runnerOutfitFile(selectedCharacter, selectedOutfit);
         playLevelMusic(session().level);
-        codeescape.desktop.ui.animation.MovingRunner runner = new codeescape.desktop.ui.animation.MovingRunner(this::load, runnerFile);
+        codeescape.desktop.ui.animation.MovingRunner runner = new codeescape.desktop.ui.animation.MovingRunner(this::load, runnerFile, uiScheduler);
         codeescape.desktop.ui.screens.RunningTransitionScreen.Result tr =
                 codeescape.desktop.ui.screens.RunningTransitionScreen.create(
                         session().level, LevelMetadata.of(session().level).backgroundImage, this::load, runner, CYAN, CREAM, GOLD);
         runner.progressBar = tr.progressBar;
 
-        root.add(tr.panel, "RUNNING");
-        showScreen("RUNNING");
+        root.add(tr.panel, codeescape.core.flow.FlowTransitions.screenName(codeescape.core.flow.FlowState.RUNNING_TRANSITION));
+        flowNavigator.navigate(codeescape.core.flow.FlowState.RUNNING_TRANSITION, session().level);
         // Question lifecycle entry decided by the core flow contract.
         runner.onFinished = () -> dispatch(codeescape.core.flow.FlowEvent.of(codeescape.core.flow.FlowEvent.Type.LESSON_STARTED));
     }
@@ -1649,13 +1733,17 @@ private void openTreasureChest() {
     }
 
     private JButton answerButton(String s) {
-        JButton b = base(s);
-        b.setPreferredSize(new Dimension(310, 58));
-        b.setMaximumSize(new Dimension(330, 62));
-        b.setFont(new Font("SansSerif", Font.BOLD, 16));
+        JButton b = base(s == null ? "" : s);
+        b.setPreferredSize(new Dimension(160, 72));
+        b.setMinimumSize(new Dimension(120, 52));
+        b.setMaximumSize(new Dimension(340, 120));
+        b.setFont(new Font("SansSerif", Font.BOLD, 15));
         b.setBackground(new Color(40, 91, 139));
         b.setForeground(new Color(246, 251, 255));
         b.setBorder(new RoundedBorder(new Color(116, 204, 247), 1, 16));
+        b.setHorizontalAlignment(SwingConstants.CENTER);
+        b.setVerticalAlignment(SwingConstants.CENTER);
+        b.setMargin(new Insets(6, 8, 6, 8));
         return b;
     }
 

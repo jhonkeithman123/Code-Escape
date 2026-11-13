@@ -1,5 +1,7 @@
 package codeescape.desktop.ui.animation;
 
+import codeescape.desktop.scheduler.SwingScheduler;
+
 import javax.swing.*;
 import java.awt.*;
 import java.awt.image.BufferedImage;
@@ -7,6 +9,7 @@ import java.util.function.Function;
 
 public class MiniRunner extends JPanel {
     private final Function<String, BufferedImage> loader;
+    private final SwingScheduler scheduler;
     BufferedImage sheet;
     int frame = 0;
     int frameCount = 4;
@@ -16,10 +19,15 @@ public class MiniRunner extends JPanel {
     javax.swing.Timer timer;
 
     public MiniRunner(Function<String, BufferedImage> loader, String file) {
+        this(loader, file, null);
+    }
+
+    public MiniRunner(Function<String, BufferedImage> loader, String file, SwingScheduler scheduler) {
         this.loader = loader;
+        this.scheduler = scheduler;
         setOpaque(false);
         setCharacter(file);
-        timer = new javax.swing.Timer(85, e -> {
+        Runnable tick = () -> {
             frame = (frame + 1) % Math.max(1, frameCount);
             if (runnerX >= 0) {
                 runnerX += 5;
@@ -28,10 +36,14 @@ public class MiniRunner extends JPanel {
             if (jumpTicks > 0) { jumpTicks--; jumping = true; }
             else jumping = false;
             repaint();
-        });
+        };
+        timer = scheduler != null ? scheduler.repeating(85, tick) : new javax.swing.Timer(85, e -> tick.run());
+        if (timer != null) timer.stop();
         addHierarchyListener(e -> {
-            if (isShowing() && !timer.isRunning()) timer.start();
-            else if (!isShowing() && timer.isRunning()) timer.stop();
+            if (isShowing() && timer != null && !timer.isRunning()) timer.start();
+            else if (!isShowing() && timer != null && timer.isRunning()) {
+                if (scheduler != null) scheduler.stop(timer); else timer.stop();
+            }
         });
     }
 
@@ -48,7 +60,9 @@ public class MiniRunner extends JPanel {
     }
 
     public void stop() {
-        if (timer != null) timer.stop();
+        if (timer == null) return;
+        if (scheduler != null) scheduler.stop(timer);
+        else timer.stop();
     }
 
     @Override

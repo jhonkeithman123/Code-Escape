@@ -118,4 +118,43 @@ public class LessonEngineTest {
         assertFalse(engine.getSession().canCommit());
         assertFalse(engine.getSession().showZeroXpAfterCancelledRun);
     }
+
+    @Test
+    void syntaxSubmissionAndTimeoutRulesAreEnforced() {
+        LessonEngine engine = new LessonEngine();
+        engine.startNewLesson(0);
+        // find a syntax question deterministically by scanning from current level
+        int guard = 0;
+        while (!engine.isCurrentSyntax() && guard++ < 200) {
+            engine.submitChoice(engine.currentQuestion().correct);
+        }
+        assertTrue(engine.isCurrentSyntax(), "expected to reach a syntax question");
+        int hearts = engine.getHearts();
+        LessonEngine.AnswerResult wrong = engine.submitSyntax("not the expected answer");
+        assertEquals(LessonEngine.AnswerResult.WRONG, wrong);
+        assertEquals(hearts - 1, engine.getHearts());
+
+        LessonEngine.AnswerResult timeout = engine.timeout();
+        assertEquals(LessonEngine.AnswerResult.TIMEOUT_WRONG, timeout);
+        assertEquals(hearts - 2, engine.getHearts());
+
+        String expected = engine.currentQuestion().expected;
+        LessonEngine.AnswerResult ok = engine.submitSyntax("  " + (expected == null ? "" : expected.toUpperCase()) + "  ");
+        assertTrue(ok == LessonEngine.AnswerResult.CORRECT || ok == LessonEngine.AnswerResult.LEVEL_COMPLETE || ok == LessonEngine.AnswerResult.GAME_COMPLETE,
+                "correct syntax should progress");
+        assertTrue(engine.getXp() >= GameConfig.XP_PER_CORRECT);
+    }
+
+    @Test
+    void gameOverFromWrongAnswerCommitsAccordingToContract() {
+        LessonEngine engine = new LessonEngine();
+        engine.startNewLesson(0);
+        engine.setHearts(1);
+        int correct = engine.currentQuestion().correct;
+        int wrong = (correct + 1) % Math.max(2, engine.currentQuestion().answers.length);
+        LessonEngine.AnswerResult result = engine.submitChoice(wrong);
+        assertEquals(LessonEngine.AnswerResult.GAME_OVER, result);
+        assertTrue(engine.getHearts() <= 0);
+        assertTrue(FlowTransitions.shouldCommitSession(result));
+    }
 }

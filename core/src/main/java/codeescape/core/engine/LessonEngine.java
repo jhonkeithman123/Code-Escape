@@ -87,6 +87,32 @@ public class LessonEngine {
 
     public AnswerResult timeout() { return onWrong(true); }
 
+    /**
+     * Testing/demo cheat: complete the current stage (level) perfectly from the current question onward.
+     * Awards full XP for all remaining questions in the level, marks them correct, restores hearts to full,
+     * and advances to the next stage (LEVEL_COMPLETE) or game completion (GAME_COMPLETE).
+     */
+    public AnswerResult cheatCompleteCurrentStagePerfectly() {
+        int li = Math.max(0, Math.min(canonical.length - 1, session.level - 1));
+        Question[][] active = (sessionQuestions != null && sessionQuestions.length == canonical.length) ? sessionQuestions : canonical;
+        int levelQuestionCount = (active != null && li < active.length && active[li] != null)
+                ? active[li].length : GameConfig.QUESTIONS_PER_LEVEL;
+        int remaining = Math.max(0, levelQuestionCount - Math.max(0, session.questionIndex));
+        if (remaining <= 0) {
+            remaining = 1;
+        }
+        session.xp += GameConfig.XP_PER_CORRECT * remaining;
+        session.correctAnswers += remaining;
+        session.hearts = GameConfig.STARTING_HEARTS;
+        session.questionIndex = levelQuestionCount;
+        if (session.level >= GameConfig.LEVEL_COUNT) {
+            return AnswerResult.GAME_COMPLETE;
+        }
+        session.level++;
+        session.questionIndex = 0;
+        return AnswerResult.LEVEL_COMPLETE;
+    }
+
     private AnswerResult onCorrect() {
         session.xp += GameConfig.XP_PER_CORRECT;
         session.correctAnswers++;

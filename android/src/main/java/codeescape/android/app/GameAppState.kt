@@ -112,41 +112,91 @@ class GameAppState(private val context: Context) {
             sess.sessionCommitted = snap.sessionCommitted
             pendingStoryLevel = snap.pendingStoryLevel.coerceIn(1, GameConfig.LEVEL_COUNT)
             syntaxInput = snap.syntaxInput
+            resultMessage = snap.resultMessage
+            feedbackHeading = snap.feedbackHeading
+            feedbackBig = snap.feedbackBig
+            feedbackDetail = snap.feedbackDetail
+            lastAnswerCorrect = snap.lastAnswerCorrect
+            endingChestOpened = snap.endingChestOpened
+            endingTreasureDialogShown = snap.endingTreasureDialogShown
+            endingXpDialogShown = snap.endingXpDialogShown
+            endingFinalXp = snap.endingFinalXp.coerceAtLeast(0)
+            runningReason = try { if (snap.runningReason.isBlank()) null else RunningReason.valueOf(snap.runningReason) } catch (_: Exception) { null }
+            loadingTarget = try { LoadingTarget.valueOf(snap.loadingTarget) } catch (_: Exception) { LoadingTarget.LOGIN }
             // never restore pending delayed-advance callbacks; normalize to a safe resumable state
             answered = false
             awaitingAdvance = false
             cancelPendingAdvance()
             questionTimeLeft = snap.questionTimeLeft.coerceAtLeast(0)
-            endingChestOpened = false; endingTreasureDialogShown = false; endingXpDialogShown = false
-            runningReason = null
-            feedbackHeading = ""; feedbackBig = ""; feedbackDetail = ""
             exitDialogShown = false; logoutDialogShown = false
-            loadingTarget = LoadingTarget.LOGIN
-            // never restore into transient half-committed end states incorrectly
+            storyHighlightRange = null
+            // restore into safe, continuity-preserving states (process-kill best-effort)
             screen = when (s) {
                 FlowState.RUNNING_TRANSITION -> {
-                    // safer than replaying transition: resume from current question with fresh timing
-                    prepareQuestionForCurrentLevel()
-                    FlowState.QUESTION
+                    // animation cannot truly resume mid-frame after process death; restart transition safely
+                    if (runningReason == null) runningReason = RunningReason.LEVEL_COMPLETE
+                    FlowState.RUNNING_TRANSITION
                 }
                 FlowState.QUESTION -> {
                     if (sess.sessionCommitted || sess.hearts <= 0) {
+                        normalizeToDashboardBaseline()
                         FlowState.DASHBOARD
                     } else {
-                        // keep restored inputs/time when plausible, else reset
-                        if (questionTimeLeft <= 0) prepareQuestionForCurrentLevel()
+                        if (questionTimeLeft <= 0) prepareQuestionForCurrentLevel() else {
+                            // keep restored question/time/input; ensure transient answer/feedback UI is resumable
+                            answered = false
+                            awaitingAdvance = false
+                            feedbackHeading = ""; feedbackBig = ""; feedbackDetail = ""
+                            lastAnswerCorrect = null
+                        }
                         FlowState.QUESTION
                     }
                 }
                 FlowState.STORY_INTRO, FlowState.STORY_LEVEL2, FlowState.STORY_LEVEL3, FlowState.STORY_LEVEL4, FlowState.STORY_LEVEL5 -> s
                 // loading is only used post-auth on Android; resume into the story intro
                 FlowState.LOADING -> FlowState.STORY_INTRO
-                FlowState.ENDING, FlowState.GAMEOVER, FlowState.COMPLETE, FlowState.LOGOUT -> FlowState.DASHBOARD
+                FlowState.ENDING -> {
+                    // preserve ending/choreography/dialog continuity as best-effort
+                    if (endingFinalXp <= 0) endingFinalXp = sess.xp.coerceAtLeast(0)
+                    if (endingXpDialogShown) endingTreasureDialogShown = false
+                    if (endingChestOpened && !endingTreasureDialogShown && !endingXpDialogShown) {
+                        // continuity fallback: chest already opened but dialog state missing -> resume at XP summary
+                        endingXpDialogShown = true
+                    }
+                    FlowState.ENDING
+                }
+                FlowState.GAMEOVER, FlowState.COMPLETE, FlowState.LOGOUT -> {
+                    if (resultMessage.isBlank() && s == FlowState.GAMEOVER) resultMessage = "You ran out of hearts."
+                    s
+                }
+                FlowState.DASHBOARD, FlowState.PROFILE, FlowState.CHARACTER, FlowState.WELCOME, FlowState.LOGIN, FlowState.REGISTER -> {
+                    // clean run/ending state for non-run screens so stale attempt state isn't surfaced
+                    if (s == FlowState.DASHBOARD || s == FlowState.PROFILE || s == FlowState.CHARACTER) {
+                        // keep session baseline coherent; don't surface stale dialogs/feedback
+                        resetRunUiState()
+                        runningReason = null
+                    } else {
+                        normalizeToDashboardBaseline(keepNonDashboardScreen = true)
+                    }
+                    s
+                }
                 else -> s
             }
             playMusicForCurrentScreen()
             true
         } catch (_: Exception) { false }
+    }
+
+    private fun normalizeToDashboardBaseline(keepNonDashboardScreen: Boolean = false) {
+        val u = currentUsername
+        val saved = if (u != null) try { profileRepo.getLifetimeXp(u) } catch (_: Exception) { engine.getSession().savedXpBeforeRun } else 0
+        try { engine.cancelRun(saved) } catch (_: Exception) {}
+        resetRunUiState()
+        resultMessage = ""
+        pendingStoryLevel = 1
+        if (!keepNonDashboardScreen) {
+            screen = FlowState.DASHBOARD
+        }
     }
 
     private fun cancelPendingAdvance() {
@@ -173,7 +223,19 @@ class GameAppState(private val context: Context) {
                 pendingStoryLevel = pendingStoryLevel,
                 questionTimeLeft = questionTimeLeft,
                 syntaxInput = syntaxInput,
-                answered = answered && awaitingAdvance // if pending advance, restore will be normalized anyway; keep conservative
+                answered = false, // pending callbacks/answer commits are never persisted; restore normalizes safely
+                runningReason = runningReason?.name ?: "",
+                endingChestOpened = endingChestOpened,
+                endingTreasureDialogShown = endingTreasureDialogShown,
+                endingXpDialogShown = endingXpDialogShown,
+                endingFinalXp = endingFinalXp,
+                resultMessage = resultMessage,
+                feedbackHeading = "",
+                feedbackBig = "",
+                feedbackDetail = "",
+                lastAnswerCorrect = null,
+                exitDialogShown = false,
+                loadingTarget = loadingTarget.name
             )
             profileRepo.saveRunSnapshot(u, snap)
         } catch (_: Exception) {}
@@ -189,6 +251,10 @@ class GameAppState(private val context: Context) {
         // best-effort: ensure intended track is playing after process/config recreation,
         // without restarting a track that is already playing (desktop keeps music running)
         try { if (!audio.isMusicActive()) playMusicForCurrentScreen() } catch (_: Exception) {}
+        // if narration was stopped by lifecycle pause, keep highlight cleared (story can be re-read manually)
+        if (screen !in setOf(FlowState.STORY_INTRO, FlowState.STORY_LEVEL2, FlowState.STORY_LEVEL3, FlowState.STORY_LEVEL4, FlowState.STORY_LEVEL5)) {
+            storyHighlightRange = null
+        }
     }
 
     fun onPause() {
@@ -204,9 +270,10 @@ class GameAppState(private val context: Context) {
         } else {
             cancelPendingAdvance()
         }
-        // exit/logout confirms are transient UI; don't keep them across backgrounding
+        // exit/logout confirms and narration highlight are transient UI/state
         exitDialogShown = false
         logoutDialogShown = false
+        storyHighlightRange = null
         persistState()
         try { narration.pauseForLifecycle() } catch (_: Exception) { narration.stop() }
         try { audio.pauseMusic() } catch (_: Exception) {}
@@ -342,7 +409,8 @@ class GameAppState(private val context: Context) {
      */
     fun continueFromStory() {
         narration.stop()
-        if (pendingStoryLevel <= 1) {
+        val next = FlowTransitions.nextAfterStoryContinue(pendingStoryLevel)
+        if (next == FlowState.CHARACTER) {
             screen = FlowState.CHARACTER
             playMusicForCurrentScreen()
             persistState()
@@ -373,12 +441,28 @@ class GameAppState(private val context: Context) {
         lastAnswerCorrect = null
         syntaxInput = ""
         val q = engine.currentQuestion()
-        questionTimeLeft = if (q.syntax) GameConfig.SYNTAX_SECONDS else GameConfig.MCQ_SECONDS
+        questionTimeLeft = questionTimeLimitSeconds(q)
     }
 
     fun prepareQuestion() { prepareQuestionForCurrentLevel() }
 
     fun currentQuestion(): Question = engine.currentQuestion()
+
+    /**
+     * Android-only: typable/syntax questions get extra time (1-4s) based on answer complexity,
+     * while multiple-choice questions keep the original timer.
+     */
+    fun questionTimeLimitSeconds(q: Question = currentQuestion()): Int {
+        if (!q.syntax) return GameConfig.MCQ_SECONDS
+        val expected = (q.expected ?: "").trim()
+        var extra = 1
+        val len = expected.length
+        if (len >= 12) extra++
+        if (len >= 24) extra++
+        val complexity = expected.count { it in "<>{}()[]\"';:.,!&|+-*/_#=/" }
+        if (complexity >= 8) extra++
+        return GameConfig.SYNTAX_SECONDS + extra.coerceIn(1, 4)
+    }
 
     /** Desktop showGamePopup strings, kept verbatim for parity. */
     private fun setFeedbackStrings(correct: Boolean, syntax: Boolean, timedOut: Boolean) {
@@ -470,22 +554,54 @@ class GameAppState(private val context: Context) {
         action.run()
     }
 
+    fun isDemoAccount(): Boolean = (currentUsername ?: "").trim().equals("demo", ignoreCase = true)
+
+    /**
+     * Demo-only testing cheat: complete the current stage perfectly and jump straight to narration/ending flow.
+     * Triggered via a special Android gesture (long-press question HUD) for testing animations.
+     */
+    fun cheatCompleteCurrentStageForTesting() {
+        if (!isDemoAccount()) return
+        if (screen != FlowState.QUESTION) return
+        if (engine.getSession().sessionCommitted) return
+
+        cancelPendingAdvance()
+        awaitingAdvance = false
+        answered = false
+        lastAnswerCorrect = true
+        feedbackHeading = ""; feedbackBig = ""; feedbackDetail = ""
+        exitDialogShown = false
+        syntaxInput = ""
+
+        val result = engine.cheatCompleteCurrentStagePerfectly()
+        applyResult(result)
+    }
+
     private fun applyResult(result: LessonEngine.AnswerResult) {
         pendingAdvanceAction = null
         feedbackHeading = ""; feedbackBig = ""; feedbackDetail = ""
         val u = currentUsername
         if (FlowTransitions.shouldCommitSession(result) && u != null) {
             if (engine.getSession().canCommit()) {
-                endingFinalXp = engine.getXp().coerceAtLeast(0)
-                profileRepo.commitAttemptXp(u, endingFinalXp)
-                engine.markSessionCommitted()
+                val runXp = engine.getXp().coerceAtLeast(0)
+                endingFinalXp = runXp
+                try { profileRepo.commitAttemptXp(u, runXp) } catch (_: Exception) {}
+                try { engine.markSessionCommitted() } catch (_: Exception) {}
+                try {
+                    // Keep session/dashboard baseline in sync with newly committed lifetime XP.
+                    engine.getSession().savedXpBeforeRun = profileRepo.getLifetimeXp(u).coerceAtLeast(0)
+                    engine.getSession().showZeroXpAfterCancelledRun = false
+                } catch (_: Exception) {}
                 refreshProfile()
+            } else if (endingFinalXp <= 0) {
+                endingFinalXp = engine.getXp().coerceAtLeast(0)
             }
         }
         val levelAfter = engine.getLevel()
         val next = FlowTransitions.nextAfterAnswer(result, levelAfter)
         awaitingAdvance = false
         answered = false
+        lastAnswerCorrect = null
         when (result) {
             LessonEngine.AnswerResult.CORRECT -> {
                 screen = FlowState.QUESTION
@@ -504,11 +620,13 @@ class GameAppState(private val context: Context) {
             LessonEngine.AnswerResult.LEVEL_COMPLETE -> {
                 // Desktop parity: level completion shows the level story first, then the runner.
                 resultMessage = ""
+                pendingStoryLevel = levelAfter.coerceIn(2, GameConfig.LEVEL_COUNT)
                 screen = next
                 playMusicForCurrentScreen()
             }
             LessonEngine.AnswerResult.GAME_COMPLETE -> {
                 resultMessage = ""
+                endingChestOpened = false; endingTreasureDialogShown = false; endingXpDialogShown = false
                 screen = FlowState.ENDING
                 playMusicForCurrentScreen()
             }
@@ -523,6 +641,7 @@ class GameAppState(private val context: Context) {
 
     /** Runner finished (desktop MovingRunner.onFinished -> startQuestion). */
     fun onRunningFinished() {
+        if (screen != FlowState.RUNNING_TRANSITION) return
         val sess = engine.getSession()
         runningReason = null
         if (sess.hearts <= 0) {
@@ -534,6 +653,7 @@ class GameAppState(private val context: Context) {
         }
         if (sess.sessionCommitted && engine.getLevel() >= GameConfig.LEVEL_COUNT && engine.getQuestionIndex() == 0) {
             endingChestOpened = false; endingTreasureDialogShown = false; endingXpDialogShown = false
+            if (endingFinalXp <= 0) endingFinalXp = sess.xp.coerceAtLeast(0)
             screen = FlowState.ENDING
             playMusicForCurrentScreen()
             persistState()
@@ -546,28 +666,37 @@ class GameAppState(private val context: Context) {
     }
 
     fun onEndingChestOpened() {
+        if (screen != FlowState.ENDING) return
+        if (endingChestOpened) return
         endingChestOpened = true
         playVictoryMusic()
         // dialogs are driven by UI state for parity (treasure note -> XP summary)
         endingTreasureDialogShown = true
+        endingXpDialogShown = false
         persistState()
     }
 
     fun onTreasureDialogContinue() {
+        if (screen != FlowState.ENDING) return
         endingTreasureDialogShown = false
         endingXpDialogShown = true
         // keep endingFinalXp as the committed run XP snapshot for dialog parity where possible
-        if (endingFinalXp <= 0) endingFinalXp = (currentProfile?.lifetimeXp ?: 0).coerceAtLeast(0)
+        if (endingFinalXp <= 0) endingFinalXp = (currentProfile?.lifetimeXp ?: engine.getXp()).coerceAtLeast(0)
         persistState()
     }
 
     fun onEndingXpMenu() {
+        if (screen != FlowState.ENDING) return
         endingXpDialogShown = false
+        endingTreasureDialogShown = false
         returnToDashboardFromResult()
     }
 
     fun onEndingXpRetry() {
+        if (screen != FlowState.ENDING) return
         endingXpDialogShown = false
+        endingTreasureDialogShown = false
+        endingChestOpened = false
         startLessonFromBeginning()
     }
 
@@ -584,7 +713,17 @@ class GameAppState(private val context: Context) {
     }
 
     fun openProfile() { screen = FlowState.PROFILE; playMusicForCurrentScreen() }
-    fun backToDashboard() { screen = FlowState.DASHBOARD; playMusicForCurrentScreen(); persistState() }
+    fun backToDashboard() { refreshDashboardXpBaseline(); screen = FlowState.DASHBOARD; playMusicForCurrentScreen(); persistState() }
+
+    private fun refreshDashboardXpBaseline() {
+        val u = currentUsername ?: return
+        val saved = try { profileRepo.getLifetimeXp(u).coerceAtLeast(0) } catch (_: Exception) { engine.getSession().savedXpBeforeRun.coerceAtLeast(0) }
+        val sess = engine.getSession()
+        sess.savedXpBeforeRun = saved
+        sess.showZeroXpAfterCancelledRun = false
+        sess.xp = 0
+        currentProfile = try { profileRepo.findByUsername(u).orElse(currentProfile) } catch (_: Exception) { currentProfile }
+    }
 
     // --- desktop showGameExitDialog parity (QUESTION screen) ---
     fun openExitDialog() {
@@ -641,7 +780,8 @@ class GameAppState(private val context: Context) {
             FlowState.QUESTION, FlowState.RUNNING_TRANSITION -> playLevelMusic(engine.getLevel())
             FlowState.ENDING -> playLevelMusic(5)
             FlowState.COMPLETE -> audio.playMusic(AudioCatalog.TRACK_VICTORY, true)
-            FlowState.GAMEOVER -> if (!audio.isMusicActive()) audio.playMusic(AudioCatalog.TRACK_DUNGEON, true)
+            FlowState.GAMEOVER -> audio.playMusic(AudioCatalog.TRACK_DUNGEON, true)
+            FlowState.LOGOUT -> audio.stopMusic()
             else -> {}
         }
     }

@@ -23,20 +23,19 @@ public class WindowsNarrationAdapter implements NarrationPort {
 
     public void speakStory(String text, NarrationCallback callback) { speakStory(text, callback, null); }
 
-    /** Core NarrationPort karaoke contract, bridged to the desktop callback. */
+    /** Core NarrationPort karaoke contract (NarrationCallback extends the core callback). */
     @Override
     public void speakStory(String text, codeescape.core.port.NarrationCallback callback) {
-        speakStory(text, adapt(callback));
-    }
-
-    /** Bridges the core narration callback contract onto the desktop callback type. */
-    private NarrationCallback adapt(codeescape.core.port.NarrationCallback callback) {
-        if (callback == null) return null;
-        if (callback instanceof NarrationCallback) return (NarrationCallback) callback;
-        return new NarrationCallback() {
-            @Override public void onLine(int index, String t, List<int[]> r) { callback.onLine(index, t, r); }
-            @Override public void onComplete() { callback.onComplete(); }
-        };
+        if (callback == null) {
+            speakStory(text, (NarrationCallback) null, null);
+        } else if (callback instanceof NarrationCallback) {
+            speakStory(text, (NarrationCallback) callback, null);
+        } else {
+            speakStory(text, new NarrationCallback() {
+                @Override public void onLine(int index, String t, List<int[]> r) { callback.onLine(index, t, r); }
+                @Override public void onComplete() { callback.onComplete(); }
+            }, null);
+        }
     }
 
     public void speakStory(String text, NarrationCallback callback, Runnable onMusicPauseResume) {
@@ -70,7 +69,14 @@ public class WindowsNarrationAdapter implements NarrationPort {
                 while ((outputLine = reader.readLine()) != null) {
                     if (generation != storySpeechGeneration || Thread.currentThread().isInterrupted()) { process.destroy(); break; }
                     if (outputLine.startsWith("LINE:") && callback != null) {
-                        try { int idx = Integer.parseInt(outputLine.substring(5).trim()); callback.onLine(idx, text, ranges); } catch (NumberFormatException ignored) {}
+                        try {
+                            int idx = Integer.parseInt(outputLine.substring(5).trim());
+                            callback.onLine(idx, text, ranges);
+                            if (idx >= 0 && idx < ranges.size()) {
+                                int[] r = ranges.get(idx);
+                                callback.onRange(r[0], r[1]);
+                            }
+                        } catch (NumberFormatException ignored) {}
                     }
                 }
                 process.waitFor();
@@ -78,7 +84,9 @@ public class WindowsNarrationAdapter implements NarrationPort {
             } finally {
                 if (generation == storySpeechGeneration) {
                     storySpeechThread = null; storySpeechProcess = null;
-                    if (callback != null) callback.onComplete();
+                    if (callback != null) {
+                        try { callback.onComplete(); } catch (Exception ignored2) {}
+                    }
                 }
             }
         }, "CodeEscape-Story-Karaoke");

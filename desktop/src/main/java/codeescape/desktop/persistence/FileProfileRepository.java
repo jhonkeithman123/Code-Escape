@@ -24,6 +24,47 @@ public class FileProfileRepository implements ProfileRepository {
         this.usersFile = new File(dir, "users.properties");
         this.scoresFile = new File(dir, "scores.properties");
         load();
+        ensureDemoAccount();
+    }
+
+    /**
+     * Keep a local demo account available for parity with legacy desktop behavior.
+     * Non-destructive: preserves existing demo credentials/profile data when present.
+     */
+    private synchronized void ensureDemoAccount() {
+        boolean changed = false;
+        if (!accounts.containsKey("demo")) {
+            accounts.put("demo", "demo");
+            changed = true;
+        }
+        if (!emails.containsKey("demo")) {
+            emails.put("demo", "demo@codeescape.local");
+            changed = true;
+        }
+        if (!scores.containsKey("demo")) {
+            scores.put("demo", 0);
+            changed = true;
+        }
+        PlayerProfile demo = profiles.get("demo");
+        if (demo == null) {
+            demo = new PlayerProfile("demo", emails.getOrDefault("demo", "demo@codeescape.local"));
+            demo.character = "Boy";
+            demo.outfitVariant = 0;
+            demo.selectedTop = 1; demo.selectedBottom = 1; demo.selectedShoes = 1; demo.selectedAccessory = 1;
+            demo.lifetimeXp = scores.getOrDefault("demo", 0);
+            demo.savedXp = demo.lifetimeXp;
+            profiles.put("demo", demo);
+            changed = true;
+        } else {
+            if (demo.username == null || demo.username.isEmpty()) { demo.username = "demo"; changed = true; }
+            if (demo.email == null || demo.email.isEmpty()) { demo.email = emails.getOrDefault("demo", "demo@codeescape.local"); changed = true; }
+            if (demo.character == null || demo.character.isEmpty()) { demo.character = "Boy"; changed = true; }
+            scores.putIfAbsent("demo", Math.max(0, demo.lifetimeXp));
+        }
+        if (changed) {
+            saveUsers();
+            saveScores();
+        }
     }
 
     public synchronized void reload() {
@@ -32,6 +73,7 @@ public class FileProfileRepository implements ProfileRepository {
         scores.clear();
         profiles.clear();
         load();
+        ensureDemoAccount();
     }
 
     public synchronized Map<String, String> getAccounts() {

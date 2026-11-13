@@ -34,6 +34,7 @@ import kotlin.math.sin
 fun AssetEndingScene(
     isGirl: Boolean,
     variantIndex: Int,
+    initialChestOpened: Boolean = false,
     onOpened: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -55,12 +56,12 @@ fun AssetEndingScene(
     }
 
     // stages: 0 waiting, 1 flying, 2 opening, 3 opened
-    var stage by remember { mutableIntStateOf(0) }
+    var stage by remember { mutableIntStateOf(if (initialChestOpened) 3 else 0) }
     var stageStartNanos by remember { mutableLongStateOf(System.nanoTime()) }
     var frameTick by remember { mutableLongStateOf(0L) }
-    var keyProgress by remember { mutableFloatStateOf(0f) }
-    var lidAngle by remember { mutableFloatStateOf(0f) }
-    var openedNotified by remember { mutableStateOf(false) }
+    var keyProgress by remember { mutableFloatStateOf(if (initialChestOpened) 1f else 0f) }
+    var lidAngle by remember { mutableFloatStateOf(if (initialChestOpened) 1f else 0f) }
+    var openedNotified by remember { mutableStateOf(initialChestOpened) }
     var keyBoundsState by remember { mutableStateOf(Rect.Zero) }
     var keyStart by remember { mutableStateOf(Offset.Zero) }
     var lockTarget by remember { mutableStateOf(Offset.Zero) }
@@ -90,6 +91,7 @@ fun AssetEndingScene(
         }
         if (stage == 3 && !openedNotified) {
             openedNotified = true
+            // parity timing: desktop fires onTreasureOpen ~550ms after chest fully opens
             delay(550)
             try { openedCb() } catch (_: Exception) {}
         }
@@ -107,11 +109,14 @@ fun AssetEndingScene(
         val h = size.height
         drawRect(color = Color(0xFF0B1D3A), size = size)
 
+        // Reserve top space for overlay title/instructions so chest does not cover them.
+        val topSafe = max(120f, h * 0.24f)
+
         val chestImg = closedChest
-        val vw = min(max(145f, w * 0.25f), max(145f, w - 56f))
-        val vh = if (chestImg == null) max(125f, h * 0.30f) else max(125f, vw * chestImg.height / chestImg.width.toFloat())
+        val vw = min(max(140f, w * 0.24f), max(140f, w - 48f))
+        val vh = if (chestImg == null) max(120f, h * 0.28f) else max(120f, vw * chestImg.height / chestImg.width.toFloat())
         val vx = (w - vw) / 2f
-        val vy = max(8f, h * 0.035f)
+        val vy = topSafe
         val lockX = vx + vw / 2f
         val lockY = vy + vh * 0.49f
         lockTarget = Offset(lockX - 18f, lockY - 12f)
@@ -151,31 +156,35 @@ fun AssetEndingScene(
         }
 
         val v = victory
+        val charMaxW = max(90f, w * 0.22f)
+        val charMaxH = max(140f, h * 0.46f)
+        val (charW, charH) = if (v != null) {
+            val scale = min(charMaxW / v.width, charMaxH / v.height)
+            max(1f, v.width * scale) to max(1f, v.height * scale)
+        } else {
+            charMaxW to charMaxH
+        }
+        val charX = (w - charW - w * 0.06f).coerceAtLeast(w * 0.52f)
+        val charY = h - charH - h * 0.03f
         if (v != null) {
-            val maxW = max(110f, w * 0.34f)
-            val maxH = max(180f, h * 0.78f)
-            val scale = min(maxW / v.width, maxH / v.height)
-            val dw = max(1f, v.width * scale)
-            val dh = max(1f, v.height * scale)
-            val dx = (w - dw) / 2f
-            val dy = h - dh - 5f
-            drawBmp(v, dx, dy, dw, dh)
+            // Smaller character placed bottom-right so it does not cover the centered chest.
+            drawBmp(v, charX, charY, charW, charH)
             for (i in 0 until 12) {
                 val a = i * Math.PI / 6.0
-                val sx = w / 2f + (Math.cos(a) * dw * 0.58).toFloat()
-                val sy = dy + dh / 3f + (Math.sin(a) * dh * 0.22).toFloat()
-                drawCircle(Color(255, 226, 125, 210), radius = 2.5f, center = Offset(sx, sy))
+                val sx = charX + charW * 0.5f + (Math.cos(a) * charW * 0.52).toFloat()
+                val sy = charY + charH / 3f + (Math.sin(a) * charH * 0.20).toFloat()
+                drawCircle(Color(255, 226, 125, 210), radius = 2.2f, center = Offset(sx, sy))
             }
         }
 
         if (stage == 0 || stage == 1) {
-            val kw = max(48f, w * 0.09f)
-            val kh = max(30f, h * 0.09f)
-            val kxBase = w / 2f - kw / 2f
-            val charH = max(180f, h * 0.78f)
+            val kw = max(42f, w * 0.075f)
+            val kh = max(26f, h * 0.075f)
+            // Place key on the character (near upper body/hand area) so it is clearly held/carried.
+            val kxBase = (charX + charW * 0.18f).coerceIn(8f, (w - kw - 8f).coerceAtLeast(8f))
             val popT = min(1.0, ((frameTick - stageStartNanos).coerceAtLeast(0L) / 420_000_000.0)).toFloat()
-            val pop = if (stage == 0) (sin(popT * Math.PI / 2.0).toFloat() * min(30f, h * 0.07f)) else 0f
-            val kyBase = h - charH - 14f - 52f - pop
+            val pop = if (stage == 0) (sin(popT * Math.PI / 2.0).toFloat() * min(18f, h * 0.04f)) else 0f
+            val kyBase = (charY + charH * 0.28f - pop).coerceIn(8f, (h - kh - 8f).coerceAtLeast(8f))
             val eased = keyProgress * keyProgress * (3f - 2f * keyProgress)
             val kx = if (stage == 1) keyStart.x + (lockTarget.x - keyStart.x) * eased else kxBase
             val ky = if (stage == 1) keyStart.y + (lockTarget.y - keyStart.y) * eased else kyBase
@@ -188,8 +197,9 @@ fun AssetEndingScene(
                 val dw = max(1f, kbmp.width * fitScale)
                 val dh = max(1f, kbmp.height * fitScale)
                 drawBmp(kbmp, kx + (kw - dw) / 2f, ky + (kh - dh) / 2f, dw, dh)
+            } else {
+                drawCircle(Color(0xFFFFD700), radius = kw / 3f, center = Offset(kx + kw / 2f, ky + kh / 2f))
             }
-            else drawCircle(Color(0xFFFFD700), radius = kw / 3f, center = Offset(kx + kw / 2f, ky + kh / 2f))
             if (stage == 0) {
                 drawRoundRect(Color(0xFFFFDC5A), topLeft = Offset(kb.left - 4f, kb.top - 4f), size = Size(kb.width + 8f, kb.height + 8f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(12f, 12f), style = Stroke(width = 2f))
             }

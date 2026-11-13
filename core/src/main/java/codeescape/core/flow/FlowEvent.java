@@ -4,6 +4,7 @@ import codeescape.core.engine.LessonEngine;
 
 /**
  * Domain/UI events that may drive flow transitions. Java 8 compatible value object.
+ * Frontends can dispatch these through the core contract for parity-safe routing decisions.
  */
 public final class FlowEvent {
     public enum Type {
@@ -20,7 +21,13 @@ public final class FlowEvent {
         DASHBOARD_REQUESTED,
         RUN_CANCELLED,
         LOGOUT_REQUESTED,
-        LOGOUT_CONFIRMED
+        LOGOUT_CONFIRMED,
+        /** Frontend lifecycle: app/screen paused or backgrounded (no screen change by itself). */
+        APP_PAUSED,
+        /** Frontend lifecycle: app/screen resumed or foregrounded (no screen change by itself). */
+        APP_RESUMED,
+        /** Frontend lifecycle: app/screen stopping/destroying (no screen change by itself). */
+        APP_STOPPING
     }
 
     public final Type type;
@@ -38,4 +45,14 @@ public final class FlowEvent {
         return new FlowEvent(Type.ANSWER_RESULT, result, level);
     }
     public static FlowEvent level(Type type, int level) { return new FlowEvent(type, null, level); }
+
+    /** Convenience for story progression from an explicit story level context. */
+    public static FlowEvent storyContinue(int storyLevel) {
+        return new FlowEvent(Type.STORY_CONTINUE, null, storyLevel);
+    }
+
+    /** True for lifecycle-only events that must not trigger navigation. */
+    public boolean isLifecycleEvent() {
+        return type == Type.APP_PAUSED || type == Type.APP_RESUMED || type == Type.APP_STOPPING;
+    }
 }

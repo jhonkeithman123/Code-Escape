@@ -113,7 +113,12 @@ android_run() {
 doctor() {
   echo "Project: $ROOT"
   echo "Version: $VERSION"
-  if command -v java >/dev/null 2>&1; then java -version 2>&1 | head -n 2; else echo "java: NOT FOUND"; fi
+  if command -v java >/dev/null 2>&1; then
+    echo "java: $(command -v java)"
+    java -version 2>&1 | head -n 2 | sed 's/^/  /'
+  else
+    echo "java: NOT FOUND"
+  fi
   G="$(gradle_cmd)"; if [ -n "$G" ]; then echo "gradle: $G"; else echo "gradle: NOT FOUND (install Gradle or add wrapper)"; fi
   if [ -n "${ANDROID_HOME:-}" ] || [ -n "${ANDROID_SDK_ROOT:-}" ]; then echo "android sdk: configured"; else echo "android sdk: not detected (ANDROID_HOME/ANDROID_SDK_ROOT)"; fi
   ADB="$(adb_cmd)"; if [ -n "$ADB" ]; then echo "adb: $ADB"; else echo "adb: NOT FOUND"; fi
@@ -185,20 +190,40 @@ case "$cmd" in
       all) "$G" :core:build :desktop:packageRelease :android:packageReleaseArtifacts || "$G" :core:build :desktop:packageRelease ;;
       *) echo "Unknown release target: $target" >&2; exit 2 ;;
     esac
-    # manifest.json
+    # manifest.json and checksums for versioned output
     BUILT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"
+    ARTIFACTS=""
+    if [ -d "$OUT" ]; then
+      if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
+        ARTIFACTS_TMP="$(mktemp 2>/dev/null || echo "$OUT/.artifacts.tmp")"
+        : > "$ARTIFACTS_TMP"
+        (cd "$OUT" && find . -type f ! -name checksums.sha256 ! -name manifest.json -print | sed 's#^\./##' | sort) | while IFS= read -r rel; do
+          [ -n "$rel" ] || continue
+          size="$(wc -c < "$OUT/$rel" | tr -d ' ')"
+          esc_rel="$(printf '%s' "$rel" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+          printf '    {"path": "%s", "size": %s},\n' "$esc_rel" "$size" >> "$ARTIFACTS_TMP"
+        done
+        if [ -s "$ARTIFACTS_TMP" ]; then
+          ARTIFACTS="$(sed '$ s/,$//' "$ARTIFACTS_TMP")"
+        fi
+        rm -f "$ARTIFACTS_TMP"
+      fi
+    fi
     {
       echo '{'
       echo "  \"name\": \"CodeEscape\","
       echo "  \"version\": \"$VERSION\","
       echo "  \"builtAt\": \"$BUILT_AT\","
-      echo "  \"target\": \"$target\""
+      echo "  \"target\": \"$target\","
+      echo '  "artifacts": ['
+      if [ -n "$ARTIFACTS" ]; then printf '%s\n' "$ARTIFACTS"; fi
+      echo '  ]'
       echo '}'
     } > "$OUT/manifest.json"
     if command -v sha256sum >/dev/null 2>&1; then
-      (cd "$OUT" && find . -type f ! -name checksums.sha256 -print0 | sort -z | xargs -0 sha256sum) > "$OUT/checksums.sha256" 2>/dev/null || true
+      (cd "$OUT" && find . -type f ! -name checksums.sha256 ! -name manifest.json -print0 | sort -z | xargs -0 sha256sum) > "$OUT/checksums.sha256" 2>/dev/null || true
     elif command -v shasum >/dev/null 2>&1; then
-      (cd "$OUT" && find . -type f ! -name checksums.sha256 -print0 | sort -z | xargs -0 shasum -a 256) > "$OUT/checksums.sha256" 2>/dev/null || true
+      (cd "$OUT" && find . -type f ! -name checksums.sha256 ! -name manifest.json -print0 | sort -z | xargs -0 shasum -a 256) > "$OUT/checksums.sha256" 2>/dev/null || true
     fi
     echo "Release output: $OUT"
     ;;

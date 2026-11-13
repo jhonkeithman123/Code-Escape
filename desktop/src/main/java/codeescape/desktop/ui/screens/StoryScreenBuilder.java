@@ -4,9 +4,26 @@ import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
 import java.util.List;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 public final class StoryScreenBuilder {
     private StoryScreenBuilder() {}
+
+    private static final class State {
+        final String text;
+        final List<int[]> ranges;
+        final int maxChars;
+        int highlightStart = -1;
+        int highlightEnd = -1;
+        State(String text, List<int[]> ranges, int maxChars) {
+            this.text = text;
+            this.ranges = ranges;
+            this.maxChars = maxChars;
+        }
+    }
+
+    private static final Map<JLabel, State> STATES = new WeakHashMap<>();
 
     public interface Host {
         JPanel background(String name);
@@ -69,9 +86,9 @@ public final class StoryScreenBuilder {
         story.setPreferredSize(new Dimension(storyWidth, storyHeight));
         story.setMaximumSize(new Dimension(storyWidth, storyHeight));
         List<int[]> initialRanges = h.buildStoryRanges(storyText);
-        String initialLine = initialRanges.isEmpty() ? storyText : storyText.substring(initialRanges.get(0)[0], initialRanges.get(0)[1]).trim();
-        story.setText(h.wrapStoryHtml(initialLine, screenW <= 500 ? 23 : 36));
-        h.setActiveStory(story, h.buildStoryRanges(storyText));
+        int maxChars = screenW <= 500 ? 23 : 36;
+        register(story, storyText, initialRanges, maxChars);
+        h.setActiveStory(story, initialRanges);
         storyHolder.add(story, new GridBagConstraints());
         content.add(storyHolder, BorderLayout.CENTER);
 
@@ -87,5 +104,93 @@ public final class StoryScreenBuilder {
         });
         p.add(content);
         return p;
+    }
+
+    public static void register(JLabel label, String text, List<int[]> ranges, int maxChars) {
+        if (label == null) return;
+        synchronized (STATES) { STATES.put(label, new State(text == null ? "" : text, ranges, maxChars)); }
+        clearHighlight(label);
+    }
+
+    public static void clearHighlight(JLabel label) {
+        if (label == null) return;
+        State st;
+        synchronized (STATES) { st = STATES.get(label); }
+        if (st == null) return;
+        st.highlightStart = -1; st.highlightEnd = -1;
+        render(label, st);
+    }
+
+    public static void highlightLine(JLabel label, int index) {
+        if (label == null) return;
+        State st;
+        synchronized (STATES) { st = STATES.get(label); }
+        if (st == null || st.ranges == null || index < 0 || index >= st.ranges.size()) return;
+        int[] r = st.ranges.get(index);
+        highlightRange(label, r[0], r[1]);
+    }
+
+    public static void highlightRange(JLabel label, int start, int end) {
+        if (label == null) return;
+        State st;
+        synchronized (STATES) { st = STATES.get(label); }
+        if (st == null) return;
+        st.highlightStart = Math.max(0, start);
+        st.highlightEnd = Math.min(st.text.length(), Math.max(st.highlightStart, end));
+        render(label, st);
+    }
+
+    private static void render(JLabel label, State st) {
+        String full = st.text == null ? "" : st.text.trim();
+        String html;
+        int w = Math.max(220, label.getPreferredSize() != null ? label.getPreferredSize().width : 360);
+        if (st.highlightStart >= 0 && st.highlightEnd > st.highlightStart && st.highlightEnd <= st.text.length()) {
+            int s = Math.max(0, Math.min(st.highlightStart, full.length()));
+            int e = Math.max(s, Math.min(st.highlightEnd, full.length()));
+            // Adjust indices against trimmed full text if needed (ranges were built from original text)
+            String original = st.text == null ? "" : st.text;
+            int trimOffset = original.indexOf(full);
+            if (trimOffset > 0) {
+                s = Math.max(0, st.highlightStart - trimOffset);
+                e = Math.max(s, st.highlightEnd - trimOffset);
+                s = Math.min(s, full.length());
+                e = Math.min(e, full.length());
+            }
+            String before = full.substring(0, s);
+            String active = full.substring(s, e);
+            String after = full.substring(e);
+            // Always show full story text; highlight the currently read range within it.
+            html = "<html><div style='text-align:center;width:" + w + "px;'>"
+                    + "<span style='color:#E8F1FF;'>" + escape(before) + "</span>"
+                    + "<span style='color:#FFFFFF;background-color:#2E6FA8;font-weight:bold;'>" + escape(active) + "</span>"
+                    + "<span style='color:#E8F1FF;'>" + escape(after) + "</span>"
+                    + "</div></html>";
+        } else {
+            html = "<html><div style='text-align:center;width:" + w + "px;'>"
+                    + "<span style='color:#E8F1FF;'>" + escape(full) + "</span>"
+                    + "</div></html>";
+        }
+        Runnable r = () -> label.setText(html);
+        if (SwingUtilities.isEventDispatchThread()) r.run(); else SwingUtilities.invokeLater(r);
+    }
+
+    private static java.util.ArrayList<String> wrapLines(String text, int maxChars) {
+        java.util.ArrayList<String> lines = new java.util.ArrayList<>();
+        if (text == null) return lines;
+        String[] words = text.trim().split("\\s+");
+        StringBuilder current = new StringBuilder();
+        for (String word : words) {
+            if (word.isEmpty()) continue;
+            if (current.length() == 0) current.append(word);
+            else if (current.length() + 1 + word.length() <= maxChars) current.append(' ').append(word);
+            else { lines.add(current.toString()); current.setLength(0); current.append(word); }
+        }
+        if (current.length() > 0) lines.add(current.toString());
+        return lines;
+    }
+
+    private static String escape(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 }

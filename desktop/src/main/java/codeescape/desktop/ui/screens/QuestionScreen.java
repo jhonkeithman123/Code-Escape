@@ -63,7 +63,10 @@ public final class QuestionScreen {
         } else if (r.answerButtons != null && answers != null) {
             for (int i = 0; i < r.answerButtons.length && i < answers.length; i++) {
                 if (r.answerButtons[i] != null) {
-                    r.answerButtons[i].setText(answers[i] == null ? "" : answers[i]);
+                    String ans = answers[i] == null ? "" : answers[i];
+                    // HTML enables wrapping/multi-line display so full choice text is visible (avoids "..." truncation)
+                    String html = "<html><div style='text-align:center;'>" + escapeHtml(ans) + "</div></html>";
+                    r.answerButtons[i].setText(html);
                     r.answerButtons[i].setEnabled(true);
                 }
             }
@@ -72,6 +75,22 @@ public final class QuestionScreen {
             r.questionBackground.revalidate();
             r.questionBackground.repaint();
         }
+    }
+
+    public static String formatCounter(int level, int questionIndexZeroBased, int questionsPerLevel) {
+        return "LEVEL " + level + " • QUESTION " + (questionIndexZeroBased + 1) + " / " + questionsPerLevel;
+    }
+
+    public static String formatQuestionHtml(String questionText) {
+        return "<html><center>" + questionText + "</center></html>";
+    }
+
+    private static String escapeHtml(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;");
     }
 
     public static void setAnswerInputsEnabled(Refs r, boolean enabled) {
@@ -153,8 +172,8 @@ public final class QuestionScreen {
         r.answerGrid = new JPanel(new GridLayout(2, 2, 8, 8));
         r.answerGrid.setOpaque(false);
         r.answerGrid.setBorder(new EmptyBorder(12, 6, 8, 6));
-        r.answerGrid.setPreferredSize(new Dimension(320, 190));
-        r.answerGrid.setMaximumSize(new Dimension(340, 210));
+        r.answerGrid.setPreferredSize(new Dimension(340, 220));
+        r.answerGrid.setMaximumSize(new Dimension(360, 260));
         for (int i = 0; i < 4; i++) {
             final int choice = i;
             r.answerButtons[i] = ui.answerButton("");

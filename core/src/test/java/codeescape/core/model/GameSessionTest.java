@@ -35,4 +35,20 @@ public class GameSessionTest {
         assertFalse(s.showZeroXpAfterCancelledRun);
         assertFalse(s.canCommit());
     }
+
+    @Test
+    void commitGuardPreventsDuplicateCommitAndXpBaselineSemantics() {
+        GameSession s = new GameSession();
+        s.resetForNewLesson(25);
+        assertTrue(s.canCommit());
+        assertEquals(25, s.displayedSavedXp());
+        s.markCommitted();
+        assertFalse(s.canCommit());
+        assertEquals(25, s.displayedSavedXp());
+        // already committed run should stay committed on subsequent checks/cancel-view logic in callers
+        s.resetAfterCancel(25);
+        assertTrue(s.showZeroXpAfterCancelledRun);
+        assertEquals(0, s.displayedSavedXp());
+        assertFalse(s.sessionCommitted); // resetAfterCancel represents an uncommitted cancelled run baseline
+    }
 }

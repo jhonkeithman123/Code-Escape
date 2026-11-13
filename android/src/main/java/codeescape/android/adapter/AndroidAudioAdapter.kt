@@ -115,11 +115,19 @@ class AndroidAudioAdapter(private val context: Context) : AudioPort {
 
     private fun playSfxAsset(name: String): Boolean {
         return try {
-            val candidates = listOf(name, "sfx/$name", "music/$name", "audio/$name")
-            val cacheKey = candidates.joinToString("|")
+            val base = name.substringBeforeLast('.', name)
+            val ext = if (name.contains('.')) name.substringAfterLast('.') else "wav"
+            val variants = linkedSetOf(
+                name, "sfx/$name", "music/$name", "audio/$name", "sound/$name",
+                "$base.wav", "sfx/$base.wav", "music/$base.wav", "audio/$base.wav",
+                "$base.mp3", "sfx/$base.mp3", "music/$base.mp3", "audio/$base.mp3",
+                "$base.ogg", "sfx/$base.ogg", "music/$base.ogg", "audio/$base.ogg"
+            )
+            if (ext !in listOf("wav", "mp3", "ogg")) variants.add("$base.$ext")
+            val cacheKey = variants.joinToString("|")
             val id = sfxCache[cacheKey] ?: run {
                 var sid = 0
-                for (path in candidates) {
+                for (path in variants) {
                     try {
                         val afd = context.assets.openFd(path)
                         sid = soundPool.load(afd, 1)

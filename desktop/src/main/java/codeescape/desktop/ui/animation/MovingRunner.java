@@ -1,6 +1,7 @@
 package codeescape.desktop.ui.animation;
 
 import codeescape.core.animation.AnimationTiming;
+import codeescape.desktop.scheduler.SwingScheduler;
 
 import javax.swing.*;
 import java.awt.*;
@@ -9,6 +10,7 @@ import java.util.function.Function;
 
 public class MovingRunner extends JPanel {
     private final Function<String, BufferedImage> loader;
+    private final SwingScheduler scheduler;
     BufferedImage sheet;
     BufferedImage[] isolatedFrames;
     double x;
@@ -25,7 +27,12 @@ public class MovingRunner extends JPanel {
     private static final long RUN_DURATION_NANOS = AnimationTiming.RUN_DURATION_NANOS;
 
     public MovingRunner(Function<String, BufferedImage> loader, String file) {
+        this(loader, file, null);
+    }
+
+    public MovingRunner(Function<String, BufferedImage> loader, String file, SwingScheduler scheduler) {
         this.loader = loader;
+        this.scheduler = scheduler;
         setOpaque(false);
         setDoubleBuffered(true);
         sheet = loader.apply(file);
@@ -37,7 +44,7 @@ public class MovingRunner extends JPanel {
         x = -120;
         startNanos = System.nanoTime();
         lastNanos = startNanos;
-        timer = new javax.swing.Timer(15, e -> {
+        Runnable tick = () -> {
             long now = System.nanoTime();
             long elapsed = now - startNanos;
             lastNanos = now;
@@ -57,20 +64,22 @@ public class MovingRunner extends JPanel {
 
             if (progress >= 1.0) {
                 x = target;
-                timer.stop();
+                stopTimer();
                 repaint();
                 if (onFinished != null) SwingUtilities.invokeLater(onFinished);
                 return;
             }
             repaint();
-        });
+        };
+        timer = scheduler != null ? scheduler.repeating(15, tick) : new javax.swing.Timer(15, e -> tick.run());
+        if (timer != null) timer.stop();
         addHierarchyListener(e -> {
-            if (isShowing() && !timer.isRunning()) {
+            if (isShowing() && timer != null && !timer.isRunning()) {
                 startNanos = System.nanoTime();
                 lastNanos = startNanos;
                 timer.start();
-            } else if (!isShowing() && timer.isRunning()) {
-                timer.stop();
+            } else if (!isShowing() && timer != null && timer.isRunning()) {
+                stopTimer();
             }
         });
     }
@@ -95,8 +104,14 @@ public class MovingRunner extends JPanel {
         return Math.max(68, (int) Math.round(getDisplayHeight() * sourceRatio));
     }
 
+    private void stopTimer() {
+        if (timer == null) return;
+        if (scheduler != null) scheduler.stop(timer);
+        else timer.stop();
+    }
+
     public void stop() {
-        if (timer != null) timer.stop();
+        stopTimer();
     }
 
     @Override

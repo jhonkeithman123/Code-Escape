@@ -172,7 +172,20 @@ class AndroidProfileRepository(context: Context) : ProfileRepository {
         val pendingStoryLevel: Int,
         val questionTimeLeft: Int,
         val syntaxInput: String,
-        val answered: Boolean
+        val answered: Boolean,
+        // best-effort continuity fields (backward-compatible defaults for older snapshots)
+        val runningReason: String = "",
+        val endingChestOpened: Boolean = false,
+        val endingTreasureDialogShown: Boolean = false,
+        val endingXpDialogShown: Boolean = false,
+        val endingFinalXp: Int = 0,
+        val resultMessage: String = "",
+        val feedbackHeading: String = "",
+        val feedbackBig: String = "",
+        val feedbackDetail: String = "",
+        val lastAnswerCorrect: Boolean? = null,
+        val exitDialogShown: Boolean = false,
+        val loadingTarget: String = "LOGIN"
     ) {
         fun toJson(): JSONObject = JSONObject()
             .put("screen", screen)
@@ -188,6 +201,19 @@ class AndroidProfileRepository(context: Context) : ProfileRepository {
             .put("questionTimeLeft", questionTimeLeft)
             .put("syntaxInput", syntaxInput)
             .put("answered", answered)
+            .put("runningReason", runningReason)
+            .put("endingChestOpened", endingChestOpened)
+            .put("endingTreasureDialogShown", endingTreasureDialogShown)
+            .put("endingXpDialogShown", endingXpDialogShown)
+            .put("endingFinalXp", endingFinalXp)
+            .put("resultMessage", resultMessage)
+            .put("feedbackHeading", feedbackHeading)
+            .put("feedbackBig", feedbackBig)
+            .put("feedbackDetail", feedbackDetail)
+            .put("hasLastAnswerCorrect", lastAnswerCorrect != null)
+            .put("lastAnswerCorrect", lastAnswerCorrect ?: false)
+            .put("exitDialogShown", exitDialogShown)
+            .put("loadingTarget", loadingTarget)
         companion object {
             fun fromJson(o: JSONObject): RunSnapshot = RunSnapshot(
                 screen = o.optString("screen", "DASHBOARD"),
@@ -202,7 +228,19 @@ class AndroidProfileRepository(context: Context) : ProfileRepository {
                 pendingStoryLevel = o.optInt("pendingStoryLevel", 1),
                 questionTimeLeft = o.optInt("questionTimeLeft", GameConfig.MCQ_SECONDS),
                 syntaxInput = o.optString("syntaxInput", ""),
-                answered = o.optBoolean("answered", false)
+                answered = o.optBoolean("answered", false),
+                runningReason = o.optString("runningReason", ""),
+                endingChestOpened = o.optBoolean("endingChestOpened", false),
+                endingTreasureDialogShown = o.optBoolean("endingTreasureDialogShown", false),
+                endingXpDialogShown = o.optBoolean("endingXpDialogShown", false),
+                endingFinalXp = o.optInt("endingFinalXp", 0),
+                resultMessage = o.optString("resultMessage", ""),
+                feedbackHeading = o.optString("feedbackHeading", ""),
+                feedbackBig = o.optString("feedbackBig", ""),
+                feedbackDetail = o.optString("feedbackDetail", ""),
+                lastAnswerCorrect = if (o.optBoolean("hasLastAnswerCorrect", false)) o.optBoolean("lastAnswerCorrect", false) else null,
+                exitDialogShown = o.optBoolean("exitDialogShown", false),
+                loadingTarget = o.optString("loadingTarget", "LOGIN")
             )
         }
     }

@@ -180,13 +180,17 @@ switch -Regex ($Command) {
   '^(?i)(-h|--help|help)$' { Show-Usage; break }
   '^(?i)version$' {
     Write-Output "CodeEscape $Version"
-    try { & java -version 2>&1 | Select-Object -First 1 } catch {}
+    try { & java -version 2>&1 | Select-Object -First 1 | ForEach-Object { Write-Output $_ } } catch {}
     break
   }
   '^(?i)doctor$' {
     Write-Output "Project: $Root"
     Write-Output "Version: $Version"
-    try { & java -version 2>&1 | Select-Object -First 2 } catch { Write-Output "java: NOT FOUND" }
+    $javaCmd = Get-Command java -ErrorAction SilentlyContinue
+    if ($javaCmd) {
+      Write-Output "java: $($javaCmd.Source)"
+      try { & java -version 2>&1 | Select-Object -First 2 | ForEach-Object { Write-Output "  $_" } } catch {}
+    } else { Write-Output "java: NOT FOUND" }
     $g = Get-GradleCmd; if ($g) { Write-Output "gradle: $g" } else { Write-Output "gradle: NOT FOUND (install Gradle or add wrapper)" }
     if ($env:ANDROID_HOME -or $env:ANDROID_SDK_ROOT) { Write-Output "android sdk: configured" } else { Write-Output "android sdk: not detected (ANDROID_HOME/ANDROID_SDK_ROOT)" }
     $adb = Get-AdbCmd; if ($adb) { Write-Output "adb: $adb" } else { Write-Output "adb: NOT FOUND" }
@@ -281,7 +285,7 @@ switch -Regex ($Command) {
     $checksumPath = Join-Path $outVer 'checksums.sha256'
     if (Test-Path $checksumPath) { Remove-Item $checksumPath -Force }
     if (Test-Path $outVer) {
-      Get-ChildItem -Path $outVer -Recurse -File | Where-Object { $_.Name -ne 'checksums.sha256' } | ForEach-Object {
+      Get-ChildItem -Path $outVer -Recurse -File | Where-Object { $_.Name -ne 'checksums.sha256' -and $_.Name -ne 'manifest.json' } | Sort-Object FullName | ForEach-Object {
         $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
         $rel = $_.FullName.Substring($outVer.Length).TrimStart('\','/')
         Add-Content -Encoding UTF8 -Path $checksumPath -Value ("$hash  $rel")

@@ -30,7 +30,48 @@ public class DesktopAudioAdapter implements AudioPort {
 
     @Override
     public void playFeedback(boolean correct) {
+        if (!musicEnabled) return;
+        String[] names = correct
+                ? new String[]{"correct.wav", "success.wav", "correct.mp3", "sfx/correct.wav", "music/correct.wav", "audio/correct.wav"}
+                : new String[]{"wrong.wav", "error.wav", "wrong.mp3", "sfx/wrong.wav", "music/wrong.wav", "audio/wrong.wav"};
+        for (String name : names) {
+            if (playSfx(name)) return;
+        }
         try { java.awt.Toolkit.getDefaultToolkit().beep(); } catch (Exception ignored) {}
+    }
+
+    private boolean playSfx(String fileName) {
+        try {
+            AudioInputStream ais = openMusic(fileName);
+            if (ais == null) return false;
+            try (AudioInputStream stream = ais) {
+                Clip clip = AudioSystem.getClip();
+                clip.open(stream);
+                applyVolumeToClip(clip);
+                clip.addLineListener(event -> {
+                    if (event.getType() == LineEvent.Type.STOP || event.getType() == LineEvent.Type.CLOSE) {
+                        try { clip.close(); } catch (Exception ignored) {}
+                    }
+                });
+                clip.setFramePosition(0);
+                clip.start();
+            }
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private void applyVolumeToClip(Clip clip) {
+        if (clip == null) return;
+        try {
+            FloatControl control = (FloatControl) clip.getControl(FloatControl.Type.MASTER_GAIN);
+            if (musicVolume <= 0f) control.setValue(control.getMinimum());
+            else {
+                float db = (float) (20.0 * Math.log10(musicVolume));
+                control.setValue(Math.max(control.getMinimum(), Math.min(control.getMaximum(), db)));
+            }
+        } catch (Exception ignored) {}
     }
 
     public void playLevelMusic(int levelNumber) {
