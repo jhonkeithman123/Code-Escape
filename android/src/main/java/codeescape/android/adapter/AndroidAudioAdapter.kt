@@ -10,6 +10,7 @@ import codeescape.core.port.AudioPort
 class AndroidAudioAdapter(private val context: Context) : AudioPort {
     private var music: MediaPlayer? = null
     private var enabled = true
+    private var muted = false
     private var volume = 0.45f
     private var currentTrack: String? = null
     private var currentLoop: Boolean = true
@@ -27,6 +28,13 @@ class AndroidAudioAdapter(private val context: Context) : AudioPort {
 
     override fun isEnabled(): Boolean = enabled
 
+    override fun setMuted(muted: Boolean) {
+        this.muted = muted
+        if (muted) stopMusic()
+    }
+
+    override fun isMuted(): Boolean = muted
+
     override fun setVolume(volume01: Float) {
         volume = volume01.coerceIn(0f, 1f)
         try { music?.setVolume(volume, volume) } catch (_: Exception) {}
@@ -41,7 +49,7 @@ class AndroidAudioAdapter(private val context: Context) : AudioPort {
         currentTrack = trackId
         currentLoop = loop
         pausedByLifecycle = false
-        if (!enabled) return
+        if (!enabled || muted) return
         stopMusicInternal(releaseOnly = true)
         try {
             val resId = context.resources.getIdentifier(trackId.substringBeforeLast('.'), "raw", context.packageName)
@@ -92,7 +100,7 @@ class AndroidAudioAdapter(private val context: Context) : AudioPort {
     }
 
     override fun playFeedback(correct: Boolean) {
-        if (!enabled) return
+        if (!enabled || muted) return
         // Best-effort: try short SFX asset names if bundled; otherwise system tone.
         val names = if (correct) {
             listOf("correct.wav", "success.wav", "correct.mp3", "sfx/correct.wav", "music/correct.wav")
@@ -154,14 +162,14 @@ class AndroidAudioAdapter(private val context: Context) : AudioPort {
 
     fun resumeMusic() {
         try {
-            if (enabled && pausedByLifecycle && music != null && music?.isPlaying == false) {
+            if (enabled && !muted && pausedByLifecycle && music != null && music?.isPlaying == false) {
                 music?.start()
             }
             pausedByLifecycle = false
         } catch (_: Exception) {
             // best-effort recovery: restart intended track
             val t = currentTrack
-            if (enabled && t != null) playMusic(t, currentLoop)
+            if (enabled && !muted && t != null) playMusic(t, currentLoop)
         }
     }
 

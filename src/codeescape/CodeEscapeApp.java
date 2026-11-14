@@ -5,22 +5,14 @@ import javax.swing.border.EmptyBorder;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.BufferedInputStream;
-import java.io.InputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.util.Properties;
 import java.util.*;
-import java.util.Base64;
-import java.nio.charset.StandardCharsets;
 import javax.imageio.ImageIO;
 import javax.sound.sampled.*;
-import codeescape.core.animation.AnimationTiming;
 import codeescape.core.content.GameConfig;
 import codeescape.core.content.LevelMetadata;
 import codeescape.core.content.QuestionBank;
 import codeescape.core.content.StoryContent;
+import codeescape.core.model.GameSettings;
 import codeescape.core.model.PlayerProfile;
 import codeescape.core.model.Question;
 import codeescape.core.port.NarrationCallback;
@@ -28,6 +20,7 @@ import codeescape.core.port.ProfileRepository;
 import codeescape.desktop.adapter.DesktopAudioAdapter;
 import codeescape.desktop.adapter.WindowsNarrationAdapter;
 import codeescape.desktop.persistence.FileProfileRepository;
+import codeescape.desktop.persistence.FileSettingsStore;
 import codeescape.desktop.ui.components.*;
 
 public class CodeEscapeApp extends JFrame {
@@ -42,7 +35,6 @@ public class CodeEscapeApp extends JFrame {
     private final Map<String, int[]> savedStyles = new HashMap<>();
     private final FileProfileRepository profileRepository = new FileProfileRepository(new File("."));
 
-    private JLabel[] hintEndingTextHolder = new JLabel[1];
     private String username = "";
     private String email = "";
     private String selectedCharacter = "Boy";
@@ -66,6 +58,9 @@ public class CodeEscapeApp extends JFrame {
     private final WindowsNarrationAdapter narrationAdapter = new WindowsNarrationAdapter();
     // Narration is routed through the core NarrationPort contract (karaoke callback included).
     private final codeescape.core.port.NarrationPort narrationPort = narrationAdapter;
+    // Shared audio/narration settings, persisted per-machine in settings.properties.
+    private final FileSettingsStore settingsStore = new FileSettingsStore(new File("settings.properties"));
+    private final GameSettings settings = settingsStore.load();
     private JLabel timerLabel;
     private JLabel xpLabel;
     private JLabel heartsLabel;
@@ -108,9 +103,6 @@ public class CodeEscapeApp extends JFrame {
     private static final Color PEACH = new Color(255, 190, 135);
     private static final Color MINT = new Color(150, 247, 211);
 
-    // A shuffled copy is created for every new lesson so the question order
-    // changes each time while keeping the same session().level structure.
-    private Question[][] sessionQuestions = new Question[5][];
     private final codeescape.core.engine.LessonEngine lessonEngine = new codeescape.core.engine.LessonEngine();
     private codeescape.core.model.GameSession session() { return lessonEngine.getSession(); }
     private final codeescape.core.flow.Navigator flowNavigator = new codeescape.core.flow.Navigator() {
@@ -150,15 +142,35 @@ public class CodeEscapeApp extends JFrame {
 
     private final Question[][] questions = QuestionBank.canonical();
 
-    private static Question q(String text, String a, String b, String c, String d, int correct) {
-        return new Question(text, new String[]{a, b, c, d}, correct, false, null);
+    private void applyWindowIcon() {
+        // Swing does not inherit the jpackage launcher icon, so set the window/taskbar icon
+        // explicitly from the bundled logo at several sizes for crisp rendering.
+        BufferedImage logo = load("logo.png");
+        if (logo == null) return;
+        java.util.List<Image> icons = new ArrayList<>();
+        int[] sizes = {16, 24, 32, 48, 64, 128, 256};
+        for (int s : sizes) {
+            icons.add(scaleToSquare(logo, s));
+        }
+        setIconImages(icons);
     }
-    private static Question qs(String text, String expected) { return new Question(text, new String[0], -1, true, expected); }
-    private Color BLACK;
-    private Color WHITE;
+
+    private static BufferedImage scaleToSquare(BufferedImage src, int size) {
+        BufferedImage out = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = out.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        double ratio = Math.min((double) size / src.getWidth(), (double) size / src.getHeight());
+        int w = Math.max(1, (int) Math.round(src.getWidth() * ratio));
+        int h = Math.max(1, (int) Math.round(src.getHeight() * ratio));
+        g.drawImage(src, (size - w) / 2, (size - h) / 2, w, h, null);
+        g.dispose();
+        return out;
+    }
 
     public CodeEscapeApp() {
         setTitle("Code Escape - Gamified Programming Learning System");
+        applyWindowIcon();
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         // Start at a size that fits the current screen. The layouts can also
         // resize with the window instead of requiring a large PC monitor.
@@ -182,6 +194,7 @@ public class CodeEscapeApp extends JFrame {
 
         loadPersistenceIntoCache();
         ensureDemoAccount();
+        applySettings();
 
         buildScreens();
         showScreen("LOADING");
@@ -308,6 +321,7 @@ public class CodeEscapeApp extends JFrame {
             @Override public JPanel background(String name) { return new BackgroundPanel(name); }
             @Override public JPanel panel(int w, int h) { return CodeEscapeApp.this.panel(w, h); }
             @Override public void title(JPanel box, String text) { CodeEscapeApp.this.title(box, text); }
+            @Override public JLabel image(String name, int w, int h) { return CodeEscapeApp.this.image(name, w, h); }
             @Override public JTextField textField(String tip) { return CodeEscapeApp.this.textField(tip); }
             @Override public JPasswordField passwordField(String tip) { return CodeEscapeApp.this.passwordField(tip); }
             @Override public JButton gold(String text) { return CodeEscapeApp.this.gold(text); }
@@ -324,7 +338,6 @@ public class CodeEscapeApp extends JFrame {
                     email = p.email == null ? emails.getOrDefault(u, "") : p.email;
                     session().username = u;
                     lessonEngine.cancelRun(savedXp); // fresh run state, display 0 until committed/new lesson context
-                    session().xp = 0;
                     selectedCharacter = p.character == null ? savedCharacters.getOrDefault(u, "Boy") : p.character;
                     selectedOutfit = Math.max(0, Math.min(3, p.outfitVariant));
                     selectedTop = p.selectedTop; selectedBottom = p.selectedBottom; selectedShoes = p.selectedShoes; selectedAccessory = p.selectedAccessory;
@@ -344,6 +357,7 @@ public class CodeEscapeApp extends JFrame {
             @Override public JPanel background(String name) { return new BackgroundPanel(name); }
             @Override public JPanel panel(int w, int h) { return CodeEscapeApp.this.panel(w, h); }
             @Override public void title(JPanel box, String text) { CodeEscapeApp.this.title(box, text); }
+            @Override public JLabel image(String name, int w, int h) { return CodeEscapeApp.this.image(name, w, h); }
             @Override public JTextField textField(String tip) { return CodeEscapeApp.this.textField(tip); }
             @Override public JPasswordField passwordField(String tip) { return CodeEscapeApp.this.passwordField(tip); }
             @Override public JButton gold(String text) { return CodeEscapeApp.this.gold(text); }
@@ -395,8 +409,6 @@ public class CodeEscapeApp extends JFrame {
                 if (username != null && !username.isEmpty()) {
                     profileRepository.saveProfile(snapshotCurrentProfile());
                     loadPersistenceIntoCache();
-                } else {
-                    saveUserDatabase();
                 }
                 refreshDashboard();
                 refreshProfile();
@@ -437,14 +449,6 @@ public class CodeEscapeApp extends JFrame {
         return load(standing) != null ? standing : g + ".png";
     }
 
-    private JPanel styleSection(String title, String[] choices, java.util.function.IntConsumer action) {
-        JPanel outer = new JPanel(new BorderLayout(3,2)); outer.setOpaque(false);
-        JLabel t = label(title, 13, CYAN); t.setAlignmentX(Component.CENTER_ALIGNMENT); outer.add(t, BorderLayout.NORTH);
-        JPanel row = new JPanel(new GridLayout(1,3,3,3)); row.setOpaque(false);
-        for (int i=0;i<3;i++) { final int v=i+1; JButton b=smallBlue(choices[i]); b.addActionListener(e->action.accept(v)); row.add(b); }
-        outer.add(row, BorderLayout.CENTER); return outer;
-    }
-
     private String frontFacingFile(String character) {
         // Prefer the front-facing pose for selection, menus and the final pause.
         // The running sheet remains tied to this exact selected variant.
@@ -483,10 +487,6 @@ public class CodeEscapeApp extends JFrame {
         if(slot==1)return new String[]{"Shorts","Jeans","Baggy Pants"}[v-1];
         if(slot==2)return new String[]{"Shoes","Boots","Slippers"}[v-1];
         return new String[]{"Cap","Headband","Glasses"}[v-1];
-    }
-
-    private String customAssetBase(String character) {
-        return characterVariantFile(character, selectedOutfit).replace(".png", "");
     }
 
     private String runnerOutfitFile(String character, int variantIndex) {
@@ -572,7 +572,7 @@ public class CodeEscapeApp extends JFrame {
         welcome.setHorizontalAlignment(SwingConstants.CENTER);
         top.add(welcome, BorderLayout.CENTER);
 
-        JLabel musicStatus = label(audioAdapter.isEnabled() ? "♫ ON" : "♫ OFF", 12, audioAdapter.isEnabled() ? MINT : PEACH);
+        JLabel musicStatus = label(musicStatusText(), 12, musicStatusColor());
         musicStatus.setHorizontalAlignment(SwingConstants.RIGHT);
         top.add(musicStatus, BorderLayout.EAST);
         p.add(top, BorderLayout.NORTH);
@@ -618,8 +618,8 @@ public class CodeEscapeApp extends JFrame {
         menu.add(play);
         menu.add(Box.createVerticalStrut(12));
 
-        JButton options = menuGameButton("⚙  OPTIONS", BLUE);
-        options.addActionListener(e -> showOptionsDialog(musicStatus));
+        JButton options = menuGameButton("⚙  SETTINGS", BLUE);
+        options.addActionListener(e -> showSettingsDialog(musicStatus));
         menu.add(options);
         menu.add(Box.createVerticalStrut(12));
 
@@ -673,30 +673,37 @@ public class CodeEscapeApp extends JFrame {
         return b;
     }
 
-    private void showOptionsDialog(JLabel musicStatus) {
-        JDialog dialog = new JDialog(this, "OPTIONS", true);
-        dialog.setSize(350, 330);
+    private void showSettingsDialog(JLabel musicStatus) {
+        JDialog dialog = new JDialog(this, "SETTINGS", true);
+        dialog.setSize(380, 480);
         dialog.setLocationRelativeTo(this);
         dialog.setResizable(false);
 
         JPanel box = new JPanel();
         box.setBackground(NAVY);
-        box.setBorder(new EmptyBorder(24, 30, 24, 30));
+        box.setBorder(new EmptyBorder(22, 30, 22, 30));
         box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
 
-        JLabel title = label("OPTIONS", 30, GOLD);
+        JLabel title = label("SETTINGS", 30, GOLD);
         title.setAlignmentX(Component.CENTER_ALIGNMENT);
         box.add(title);
-        box.add(Box.createVerticalStrut(18));
+        box.add(Box.createVerticalStrut(14));
 
         JCheckBox music = new JCheckBox("Background Music");
-        music.setSelected(audioAdapter.isEnabled());
-        music.setForeground(WHITE);
+        music.setSelected(settings.isMusicEnabled());
+        music.setForeground(Color.WHITE);
         music.setBackground(NAVY);
-        music.setFont(new Font("SansSerif", Font.BOLD, 17));
+        music.setFont(new Font("SansSerif", Font.BOLD, 16));
         music.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-        JSlider volume = new JSlider(0, 100, Math.round(audioAdapter.getVolume() * 100));
+        JCheckBox mute = new JCheckBox("Mute All Sound");
+        mute.setSelected(settings.isMuted());
+        mute.setForeground(Color.WHITE);
+        mute.setBackground(NAVY);
+        mute.setFont(new Font("SansSerif", Font.BOLD, 16));
+        mute.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        JSlider volume = new JSlider(0, 100, Math.round(settings.getVolume() * 100));
         volume.setOpaque(false);
         volume.setAlignmentX(Component.CENTER_ALIGNMENT);
         volume.setMaximumSize(new Dimension(280, 45));
@@ -704,27 +711,54 @@ public class CodeEscapeApp extends JFrame {
         JLabel volumeText = label("Volume: " + volume.getValue() + "%", 15, CREAM);
         volumeText.setAlignmentX(Component.CENTER_ALIGNMENT);
 
+        JCheckBox tts = new JCheckBox("Text-to-Speech Narration");
+        tts.setSelected(settings.isTtsEnabled());
+        tts.setForeground(Color.WHITE);
+        tts.setBackground(NAVY);
+        tts.setFont(new Font("SansSerif", Font.BOLD, 16));
+        tts.setAlignmentX(Component.CENTER_ALIGNMENT);
+
         music.addActionListener(e -> {
-            // Audio enable/disable state is owned by the AudioPort adapter.
-            audioAdapter.setEnabled(music.isSelected());
-            if (music.isSelected()) startBackgroundMusic();
+            settings.setMusicEnabled(music.isSelected());
+            applySettings();
+            if (music.isSelected() && !settings.isMuted()) startBackgroundMusic();
             else stopBackgroundMusic();
-            if (musicStatus != null) {
-                musicStatus.setText(audioAdapter.isEnabled() ? "♫ MUSIC ON" : "♫ MUSIC OFF");
-                musicStatus.setForeground(audioAdapter.isEnabled() ? MINT : PEACH);
-            }
+            persistSettings();
+            updateMusicStatus(musicStatus);
+        });
+
+        mute.addActionListener(e -> {
+            settings.setMuted(mute.isSelected());
+            applySettings();
+            if (mute.isSelected()) stopBackgroundMusic();
+            else if (settings.isMusicEnabled()) startBackgroundMusic();
+            persistSettings();
+            updateMusicStatus(musicStatus);
         });
 
         volume.addChangeListener(e -> {
-            setMusicVolume(volume.getValue() / 100f);
+            settings.setVolume(volume.getValue() / 100f);
+            audioAdapter.setVolume(settings.getVolume());
             volumeText.setText("Volume: " + volume.getValue() + "%");
+            persistSettings();
+        });
+
+        tts.addActionListener(e -> {
+            settings.setTtsEnabled(tts.isSelected());
+            narrationPort.setEnabled(tts.isSelected());
+            if (!tts.isSelected()) narrationPort.stop();
+            persistSettings();
         });
 
         box.add(music);
+        box.add(Box.createVerticalStrut(8));
+        box.add(mute);
         box.add(Box.createVerticalStrut(12));
         box.add(volumeText);
         box.add(volume);
-        box.add(Box.createVerticalStrut(18));
+        box.add(Box.createVerticalStrut(12));
+        box.add(tts);
+        box.add(Box.createVerticalStrut(16));
 
         JButton done = gold("DONE");
         done.setAlignmentX(Component.CENTER_ALIGNMENT);
@@ -733,6 +767,12 @@ public class CodeEscapeApp extends JFrame {
 
         dialog.setContentPane(box);
         dialog.setVisible(true);
+    }
+
+    private void updateMusicStatus(JLabel musicStatus) {
+        if (musicStatus == null) return;
+        musicStatus.setText(musicStatusText());
+        musicStatus.setForeground(musicStatusColor());
     }
 
     private void showCreditsDialog() {
@@ -852,14 +892,6 @@ public class CodeEscapeApp extends JFrame {
         // Every new lesson is a fresh attempt. Previously committed XP remains
         // in savedXp and is shown in Profile.
         lessonEngine.startNewLesson();
-        session().xp = lessonEngine.getXp();
-        session().hearts = lessonEngine.getHearts();
-        session().level = lessonEngine.getLevel();
-        session().questionIndex = lessonEngine.getQuestionIndex();
-        session().correctAnswers = lessonEngine.getCorrectAnswers();
-        session().showZeroXpAfterCancelledRun = false;
-        session().sessionCommitted = false;
-        sessionQuestions = new Question[questions.length][]; // legacy field retained for compatibility
         playLevelMusic(1);
         startQuestion();
     }
@@ -873,114 +905,11 @@ public class CodeEscapeApp extends JFrame {
             @Override public JButton gold(String text) { return CodeEscapeApp.this.gold(text); }
             @Override public Color goldColor() { return GOLD; }
             @Override public int getWidthSafe() { return getWidth() > 0 ? getWidth() : 430; }
-            @Override public int getHeightSafe() { return getHeight() > 0 ? getHeight() : 760; }
-            @Override public java.util.List<int[]> buildStoryRanges(String text) { return CodeEscapeApp.this.buildStoryRanges(text); }
-            @Override public String wrapStoryHtml(String text, int maxChars) { return CodeEscapeApp.this.wrapStoryHtml(text, maxChars); }
             @Override public void speakStoryKaraoke(String text, JLabel label) { CodeEscapeApp.this.speakStoryKaraoke(text, label); }
             @Override public void stopStorySpeech() { CodeEscapeApp.this.stopStorySpeech(); }
-            @Override public void setActiveStory(JLabel story, java.util.List<int[]> ranges) {
-                codeescape.desktop.ui.screens.StoryScreenBuilder.register(story, storyText, ranges, getWidth() > 500 ? 36 : 23);
-            }
+            @Override public void setActiveStory(JLabel story) { activeStoryLabel = story; }
         }, titleText, storyText, buttonText, background, nextAction);
     }
-    private String htmlEscape(String text) {
-        if (text == null) return "";
-        return text.replace("&", "&amp;")
-                   .replace("<", "&lt;")
-                   .replace(">", "&gt;")
-                   .replace("\"", "&quot;")
-                   .replace("\n", "<br>");
-    }
-
-    public java.util.List<int[]> buildStoryRanges(String text) {
-        java.util.List<int[]> ranges = new ArrayList<>();
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("[^.!?]+[.!?]+|[^.!?]+$").matcher(text);
-        while (m.find()) {
-            int a=m.start(), b=m.end();
-            while(a<b && Character.isWhitespace(text.charAt(a))) a++;
-            while(b>a && Character.isWhitespace(text.charAt(b-1))) b--;
-            if(b>a) ranges.add(new int[]{a,b});
-        }
-        return ranges;
-    }
-
-    public void showStoryLyric(JLabel label, String text, int index, java.util.List<int[]> ranges) {
-        if (label == null || index < 0 || index >= ranges.size()) return;
-        String line = text.substring(ranges.get(index)[0], ranges.get(index)[1]).trim();
-        int maxChars = label.getWidth() > 500 ? 36 : 23;
-        String html = wrapStoryHtml(line, maxChars);
-        SwingUtilities.invokeLater(() -> {
-            label.setText(html);
-            label.setHorizontalAlignment(SwingConstants.CENTER);
-            label.setVerticalAlignment(SwingConstants.CENTER);
-            fadeStoryLine(label);
-        });
-    }
-
-    // Wrap every story sentence into several short lines. Keeping the line
-    // length controlled is more reliable than relying on Swing HTML width,
-    // especially on smaller laptop screens where the old text was clipped.
-    public String wrapStoryHtml(String text, int maxChars) {
-        if (text == null) return "<html><div style='text-align:center;'></div></html>";
-        String[] words = text.trim().split("\\s+");
-        java.util.List<String> lines = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        for (String word : words) {
-            if (current.length() == 0) {
-                current.append(word);
-            } else if (current.length() + 1 + word.length() <= maxChars) {
-                current.append(' ').append(word);
-            } else {
-                lines.add(current.toString());
-                current.setLength(0);
-                current.append(word);
-            }
-        }
-        if (current.length() > 0) lines.add(current.toString());
-
-        // Avoid a lonely one-line sentence when there is enough text to make
-        // the story card visually balanced.
-        if (lines.size() == 1 && lines.get(0).length() > 18) {
-            String only = lines.get(0);
-            String[] w = only.split("\\s+");
-            int mid = Math.max(1, w.length / 2);
-            StringBuilder a = new StringBuilder();
-            StringBuilder b = new StringBuilder();
-            for (int i = 0; i < w.length; i++) {
-                if (i < mid) { if (a.length() > 0) a.append(' '); a.append(w[i]); }
-                else { if (b.length() > 0) b.append(' '); b.append(w[i]); }
-            }
-            if (b.length() > 0) { lines.clear(); lines.add(a.toString()); lines.add(b.toString()); }
-        }
-
-        StringBuilder html = new StringBuilder("<html><div style='text-align:center;'>");
-        for (int i = 0; i < lines.size(); i++) {
-            if (i > 0) html.append("<br>");
-            html.append("<span style='color:#FFD54A;'>")
-                .append(htmlEscape(lines.get(i)))
-                .append("</span>");
-        }
-        html.append("</div></html>");
-        return html.toString();
-    }
-
-    private void fadeStoryLine(JLabel label) {
-        if (label == null) return;
-        final Color target = Color.WHITE;
-        final Color start = new Color(110, 125, 150);
-        final long started = System.currentTimeMillis();
-        // Non-question UI timing goes through the desktop scheduler abstraction.
-        final javax.swing.Timer[] fade = new javax.swing.Timer[1];
-        fade[0] = uiScheduler.repeating(25, () -> {
-            double t = Math.min(1.0, (System.currentTimeMillis() - started) / 360.0);
-            int r = (int)Math.round(start.getRed() + (target.getRed() - start.getRed()) * t);
-            int g = (int)Math.round(start.getGreen() + (target.getGreen() - start.getGreen()) * t);
-            int b = (int)Math.round(start.getBlue() + (target.getBlue() - start.getBlue()) * t);
-            label.setForeground(new Color(r,g,b));
-            if (t >= 1.0 && fade[0] != null) fade[0].stop();
-        });
-    }
-
     // ==================== STORY TEXT-TO-SPEECH / KARAOKE ====================
     // Wired through the NarrationPort contract (WindowsNarrationAdapter) with UI callbacks for parity.
     // Narration process/thread/generation ownership lives in the adapter.
@@ -988,24 +917,26 @@ public class CodeEscapeApp extends JFrame {
 
     public void speakStoryKaraoke(String text, JLabel label) {
         stopStorySpeech();
-        final java.util.List<int[]> ranges = buildStoryRanges(text);
         activeStoryLabel = label;
         codeescape.desktop.ui.screens.StoryScreenBuilder.clearHighlight(label);
 
+        if (!settings.isTtsEnabled()) {
+            // TTS is disabled in Settings: keep the paragraph visible, just silent.
+            return;
+        }
+
         if (!narrationAdapter.isSupported()) {
-            if (label != null) label.setText(wrapStoryHtml(text, label.getWidth() > 500 ? 36 : 23));
+            // Keep the same wrapped paragraph layout instead of swapping in a
+            // narrow fixed-character HTML block that no longer fits the card.
+            codeescape.desktop.ui.screens.StoryScreenBuilder.clearHighlight(label);
             return;
         }
 
         storyMusicWasPlaying = isBackgroundMusicPlaying();
         if (storyMusicWasPlaying) audioAdapter.stopMusic();
+        // TTS only: visual highlight sync disabled to keep full paragraph stable/readable.
         narrationPort.speakStory(text, new NarrationCallback() {
-            @Override public void onLine(int index, String t, java.util.List<int[]> r) {
-                codeescape.desktop.ui.screens.StoryScreenBuilder.highlightLine(label, index);
-            }
-            @Override public void onRange(int start, int end) {
-                codeescape.desktop.ui.screens.StoryScreenBuilder.highlightRange(label, start, end);
-            }
+            @Override public void onLine(int index, String t, java.util.List<int[]> r) { }
             @Override public void onComplete() {
                 SwingUtilities.invokeLater(() -> {
                     codeescape.desktop.ui.screens.StoryScreenBuilder.clearHighlight(label);
@@ -1723,15 +1654,6 @@ private void openTreasureChest() {
         return b;
     }
 
-    private JButton bigMenuButton(String s) {
-        JButton b = gold(s);
-        b.setPreferredSize(new Dimension(310, 58));
-        b.setMaximumSize(new Dimension(320, 60));
-        b.setFont(new Font("SansSerif", Font.BOLD, 19));
-        b.setAlignmentX(Component.CENTER_ALIGNMENT);
-        return b;
-    }
-
     private JButton answerButton(String s) {
         JButton b = base(s == null ? "" : s);
         b.setPreferredSize(new Dimension(160, 72));
@@ -1813,11 +1735,6 @@ private void openTreasureChest() {
         g.drawImage(im, (w - dw) / 2, (h - dh) / 2, dw, dh, null);
         g.dispose();
         return out;
-    }
-
-    private void drawCharacter(Graphics2D g, BufferedImage image, int x, int y, int width, int height) {
-        if (image == null) return;
-        g.drawImage(image, x, y, Math.max(1, width), Math.max(1, height), null);
     }
 
     private Image scale(BufferedImage im, int mw, int mh) {
@@ -1978,17 +1895,27 @@ private void openTreasureChest() {
         }
     }
 
-    // ==================== LOCAL USER DATABASE ====================
-    // Delegated to ProfileRepository (FileProfileRepository) for users.properties/scores.properties compatibility.
-    private void saveUserDatabase() {
-        if (username != null && !username.isEmpty() && accounts.containsKey(username)) {
-            PlayerProfile p = snapshotCurrentProfile();
-            profileRepository.saveProfile(p);
-        }
-        loadPersistenceIntoCache();
+    // ==================== MUSIC ====================
+    // Shared audio/narration settings are applied to the adapters and persisted on change.
+    private void applySettings() {
+        audioAdapter.setEnabled(settings.isMusicEnabled());
+        audioAdapter.setMuted(settings.isMuted());
+        audioAdapter.setVolume(settings.getVolume());
+        narrationPort.setEnabled(settings.isTtsEnabled());
     }
 
-    // ==================== MUSIC ====================
+    private void persistSettings() {
+        settingsStore.save(settings);
+    }
+
+    private String musicStatusText() {
+        if (settings.isMuted()) return "♫ MUTED";
+        return settings.isMusicEnabled() ? "♫ ON" : "♫ OFF";
+    }
+
+    private Color musicStatusColor() {
+        return (settings.isMuted() || !settings.isMusicEnabled()) ? PEACH : MINT;
+    }
     // Delegated to DesktopAudioAdapter (AudioPort wiring); enabled/volume state is adapter-owned.
     private void playFeedbackSound(boolean correct) {
         audioAdapter.playFeedback(correct);
@@ -2024,13 +1951,6 @@ private void openTreasureChest() {
         return codeescape.desktop.ui.animation.SpriteFrames.loadIsolatedWalkFrames(this::load, file);
     }
 
-    private int detectFrameCount(BufferedImage image) {
-        return codeescape.desktop.ui.animation.SpriteFrames.detectFrameCount(image);
-    }
-
-    private int[] frameSequenceFor(int count) {
-        return codeescape.desktop.ui.animation.SpriteFrames.frameSequenceFor(count);
-    }
     // MiniRunner and MovingRunner animation views migrated to codeescape.desktop.ui.animation.*
 
 

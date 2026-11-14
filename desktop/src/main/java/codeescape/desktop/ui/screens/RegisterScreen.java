@@ -11,6 +11,7 @@ public final class RegisterScreen {
         JPanel background(String name);
         JPanel panel(int w, int h);
         void title(JPanel box, String text);
+        JLabel image(String name, int w, int h);
         JTextField textField(String tip);
         JPasswordField passwordField(String tip);
         JButton gold(String text);
@@ -23,8 +24,12 @@ public final class RegisterScreen {
     public static JPanel create(Host h) {
         JPanel p = h.background("castle.png");
         p.setLayout(new GridBagLayout());
-        JPanel box = h.panel(360, 590);
+        JPanel box = h.panel(360, 640);
         box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
+        JLabel logo = h.image("logo.png", 170, 106);
+        logo.setAlignmentX(Component.CENTER_ALIGNMENT);
+        box.add(logo);
+        box.add(Box.createVerticalStrut(10));
         h.title(box, "REGISTER");
 
         JTextField user = h.textField("Username");

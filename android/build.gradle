@@ -142,11 +142,10 @@ dependencies {
 
 // NOTE: The task name `packageRelease` is reserved by the Android Gradle Plugin
 // (it packages the release APK for the release variant). Our versioned-output
-// collector therefore uses a distinct name. It packages the signed release APK
-// when release signing is configured, otherwise falls back to the debug APK.
+// collector therefore uses a distinct name.
 tasks.register("packageReleaseArtifacts") {
     group = "build"
-    description = "Copies a distributable Android APK (release if signed, else debug) into output/v<version>/android."
+    description = "Copies a distributable Android APK into output/v<version>/android as CodeEscape-<version>.apk and updates output/v<version>/changelog.md."
     dependsOn(hasReleaseSigning ? "assembleRelease" : "assembleDebug")
     doLast {
         def v = project.version.toString()
@@ -154,16 +153,47 @@ tasks.register("packageReleaseArtifacts") {
         outDir.mkdirs()
         def variant = hasReleaseSigning ? "release" : "debug"
         def apkDir = file("${buildDir}/outputs/apk/${variant}")
+        def copied = false
         if (apkDir.exists()) {
-            copy {
-                from(apkDir) { include("*.apk") }
-                into(outDir)
+            fileTree(apkDir) { include("*.apk") }.each { File apk ->
+                def destName = "CodeEscape-${v}.apk"
+                copy {
+                    from(apk)
+                    into(outDir)
+                    rename { String fileName -> destName }
+                }
+                copied = true
+                println("Android APK packaged to: ${new File(outDir, destName)}")
             }
         }
-        if (hasReleaseSigning) {
-            println("Android release APK packaged to: ${outDir}")
-        } else {
-            println("Android debug APK packaged to: ${outDir} (no release signing configured; see keystore.properties.example)")
+        if (!copied) {
+            println("No APK found in ${apkDir}")
         }
+        // Update changelog.md in output/v<version>/
+        def changelogFile = file("${rootDir}/output/v${v}/changelog.md")
+        def changelogDir = changelogFile.parentFile
+        if (!changelogDir.exists()) changelogDir.mkdirs()
+        def gitLog = ""
+        try {
+            def proc = ["git", "log", "--oneline", "-n", "50"].execute(null, rootDir)
+            proc.waitFor()
+            if (proc.exitValue() == 0) {
+                gitLog = proc.text.trim()
+            }
+        } catch (Exception ignored) {
+            gitLog = "(git history unavailable)"
+        }
+        def header = "# Code Escape Changelog\n\n## ${v} (Android)\n\n"
+        def body = gitLog ? gitLog.split("\n").collect { "- ${it}" }.join("\n") : "- (no commits found)"
+        def content = header + body + "\n\n---\n\n"
+        // Prepend: if file exists, keep older content after our new section
+        def existing = changelogFile.exists() ? changelogFile.text : ""
+        if (existing.startsWith("# Code Escape Changelog")) {
+            // Replace the top section for this version if present, else prepend
+            changelogFile.text = content + existing.replaceFirst(/(?s)^# Code Escape Changelog\n\n## ${java.util.regex.Pattern.quote(v)} \(Android\)\n\n.*?\n---\n\n/, "")
+        } else {
+            changelogFile.text = content + existing
+        }
+        println("Changelog updated: ${changelogFile}")
     }
 }

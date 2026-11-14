@@ -9,12 +9,14 @@ import codeescape.android.adapter.AndroidAudioAdapter
 import codeescape.android.adapter.AndroidLifecycleScheduler
 import codeescape.android.adapter.AndroidNarrationAdapter
 import codeescape.android.adapter.AndroidProfileRepository
+import codeescape.android.adapter.AndroidSettingsStore
 import codeescape.core.content.AudioCatalog
 import codeescape.core.content.GameConfig
 import codeescape.core.content.LevelMetadata
 import codeescape.core.engine.LessonEngine
 import codeescape.core.flow.FlowState
 import codeescape.core.flow.FlowTransitions
+import codeescape.core.model.GameSettings
 import codeescape.core.model.PlayerProfile
 import codeescape.core.model.Question
 import java.lang.Runnable
@@ -25,6 +27,14 @@ class GameAppState(private val context: Context) {
     val audio = AndroidAudioAdapter(context)
     val narration = AndroidNarrationAdapter(context)
     val scheduler = AndroidLifecycleScheduler()
+    val settingsStore = AndroidSettingsStore(context)
+
+    // Shared audio/narration settings (persisted in SharedPreferences).
+    var musicEnabled by mutableStateOf(true)
+    var muted by mutableStateOf(false)
+    var volume by mutableStateOf(GameSettings.DEFAULT_VOLUME)
+    var ttsEnabled by mutableStateOf(true)
+    var showSettings by mutableStateOf(false)
 
     val engine = LessonEngine()
 
@@ -76,7 +86,52 @@ class GameAppState(private val context: Context) {
     init {
         narration.onRange = { s, e -> storyHighlightRange = s to e }
         narration.onDone = { storyHighlightRange = null }
+        val loaded = settingsStore.load()
+        musicEnabled = loaded.isMusicEnabled
+        muted = loaded.isMuted
+        volume = loaded.volume
+        ttsEnabled = loaded.isTtsEnabled
+        applySettings()
         restoreSessionHint()
+    }
+
+    private fun applySettings() {
+        audio.isEnabled = musicEnabled
+        audio.isMuted = muted
+        audio.volume = volume
+        narration.isEnabled = ttsEnabled
+    }
+
+    private fun persistSettings() {
+        settingsStore.save(GameSettings(musicEnabled, muted, volume, ttsEnabled))
+    }
+
+    fun openSettings() { showSettings = true }
+    fun closeSettings() { showSettings = false }
+
+    fun updateMusicEnabled(enabled: Boolean) {
+        musicEnabled = enabled
+        applySettings()
+        persistSettings()
+    }
+
+    fun updateMuted(muted: Boolean) {
+        this.muted = muted
+        applySettings()
+        persistSettings()
+    }
+
+    fun updateVolume(volume: Float) {
+        this.volume = volume.coerceIn(0f, 1f)
+        applySettings()
+        persistSettings()
+    }
+
+    fun updateTtsEnabled(enabled: Boolean) {
+        ttsEnabled = enabled
+        applySettings()
+        if (!enabled) narration.stop()
+        persistSettings()
     }
 
     private fun restoreSessionHint() {
@@ -721,7 +776,6 @@ class GameAppState(private val context: Context) {
         val sess = engine.getSession()
         sess.savedXpBeforeRun = saved
         sess.showZeroXpAfterCancelledRun = false
-        sess.xp = 0
         currentProfile = try { profileRepo.findByUsername(u).orElse(currentProfile) } catch (_: Exception) { currentProfile }
     }
 
@@ -796,7 +850,7 @@ class GameAppState(private val context: Context) {
 
     fun speak(text: String) {
         storyHighlightRange = null
-        if (narration.isSupported) narration.speakStory(text)
+        if (ttsEnabled && narration.isSupported) narration.speakStory(text)
     }
     fun stopNarration() { storyHighlightRange = null; narration.stop() }
 

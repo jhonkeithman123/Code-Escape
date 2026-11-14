@@ -25,8 +25,8 @@ Commands:
   run [target]         Run app: desktop (default), android
   test [target]        Run tests: core, desktop, all (default: all)
   clean                Clean Gradle build outputs
-  release [target]     Package versioned artifacts into output/v$Version/ (core|desktop|android|all)
-  android [action]     Android helpers: devices, install, launch, run (default: devices)
+  release [target]     Package versioned artifacts into output/v$Version/ (core|desktop|android|all|-all)
+  android [action]     Android helpers: devices, install, launch, run, release (default: devices)
   doctor               Check common prerequisites
 
 Android run/install selects the most active adb device/emulator automatically.
@@ -238,7 +238,11 @@ switch -Regex ($Command) {
         Launch-AndroidApp $sel.serial
       }
       'run' { Run-AndroidApp }
-      default { throw "Unknown android action: $action (expected: devices, install, launch, run)" }
+      'release' {
+        Invoke-Gradle @(':android:packageReleaseArtifacts')
+        Write-Output "Android release packaged to output/v$Version/android/CodeEscape-$Version.apk and output/v$Version/changelog.md updated."
+      }
+      default { throw "Unknown android action: $action (expected: devices, install, launch, run, release)" }
     }
     break
   }
@@ -254,6 +258,7 @@ switch -Regex ($Command) {
   }
   '^(?i)release$' {
     $target = if ($ArgsRest.Count -gt 0) { $ArgsRest[0] } else { 'all' }
+    if ($target -in @('-all','--all','all')) { $target = 'all' }
     $outVer = Join-Path $Root "output\v$Version"
     New-Item -ItemType Directory -Force -Path $outVer | Out-Null
     switch ($target) {
@@ -264,7 +269,7 @@ switch -Regex ($Command) {
         try { Invoke-Gradle @(':core:build', ':desktop:packageRelease', ':android:packageReleaseArtifacts') }
         catch { Invoke-Gradle @(':core:build', ':desktop:packageRelease') }
       }
-      default { throw "Unknown release target: $target" }
+      default { throw "Unknown release target: $target (use core|desktop|android|all or -all)" }
     }
     # Manifest and checksums for versioned output
     $artifacts = @()

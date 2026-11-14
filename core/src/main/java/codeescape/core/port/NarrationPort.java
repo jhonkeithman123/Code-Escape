@@ -2,6 +2,8 @@ package codeescape.core.port;
 
 public interface NarrationPort {
     boolean isSupported();
+    void setEnabled(boolean enabled);
+    boolean isEnabled();
     void speakStory(String text);
     void stop();
 

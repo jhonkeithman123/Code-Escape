@@ -25,8 +25,8 @@ Commands:
   run [target]         Run app: desktop (default), android
   test [target]        Run tests: core, desktop, all (default: all)
   clean                Clean Gradle build outputs
-  release [target]     Package versioned artifacts into output/v$VERSION/ (core|desktop|android|all)
-  android [action]     Android helpers: devices, install, launch, run (default: devices)
+  release [target]     Package versioned artifacts into output/v$VERSION/ (core|desktop|android|all|-all)
+  android [action]     Android helpers: devices, install, launch, run, release (default: devices)
   doctor               Check common prerequisites
 
 Android run/install selects the most active adb device/emulator automatically.
@@ -167,7 +167,8 @@ case "$cmd" in
       install) G="$(need_gradle)"; cd "$ROOT"; "$G" :android:assembleDebug; android_install ;;
       launch) android_launch ;;
       run) android_run ;;
-      *) echo "Unknown android action: $action (expected: devices, install, launch, run)" >&2; exit 2 ;;
+      release) G="$(need_gradle)"; cd "$ROOT"; "$G" :android:packageReleaseArtifacts; echo "Android release packaged to output/v$VERSION/android/CodeEscape-$VERSION.apk and output/v$VERSION/changelog.md updated." ;;
+      *) echo "Unknown android action: $action (expected: devices, install, launch, run, release)" >&2; exit 2 ;;
     esac
     ;;
   test)
@@ -180,7 +181,9 @@ case "$cmd" in
     esac
     ;;
   release)
-    target="${1:-all}"; G="$(need_gradle)"; cd "$ROOT"
+    target="${1:-all}"
+    case "$target" in -all|--all|all) target="all" ;; esac
+    G="$(need_gradle)"; cd "$ROOT"
     OUT="$ROOT/output/v$VERSION"
     mkdir -p "$OUT"
     case "$target" in
@@ -188,7 +191,7 @@ case "$cmd" in
       desktop) "$G" :desktop:packageRelease ;;
       android) "$G" :android:packageReleaseArtifacts ;;
       all) "$G" :core:build :desktop:packageRelease :android:packageReleaseArtifacts || "$G" :core:build :desktop:packageRelease ;;
-      *) echo "Unknown release target: $target" >&2; exit 2 ;;
+      *) echo "Unknown release target: $target (use core|desktop|android|all or -all)" >&2; exit 2 ;;
     esac
     # manifest.json and checksums for versioned output
     BUILT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"

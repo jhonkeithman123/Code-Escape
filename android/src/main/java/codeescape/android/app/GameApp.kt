@@ -109,21 +109,26 @@ fun GameApp(activity: Activity) {
         surface = Color(0xFF10263D)
     )) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            NavHost(navController = nav, startDestination = routeFor(FlowState.WELCOME)) {
-                composable("welcome") { WelcomeScreen(app) }
-                composable("loading") { LoadingScreen(app) }
-                composable("login") { LoginScreen(app) }
-                composable("register") { RegisterScreen(app) }
-                composable("character") { CharacterScreen(app) }
-                composable("story") { StoryScreen(app) }
-                composable("dashboard") { DashboardScreen(app) }
-                composable("question") { QuestionScreen(app) }
-                composable("running") { RunningScreen(app) }
-                composable("profile") { ProfileScreen(app) }
-                composable("complete") { CompleteScreen(app) }
-                composable("gameover") { GameOverScreen(app) }
-                composable("ending") { EndingScreen(app) }
-                composable("logout") { ResultScreen(app, title = "Logged out", message = "See you next time!") }
+            Box(Modifier.fillMaxSize()) {
+                NavHost(navController = nav, startDestination = routeFor(FlowState.WELCOME)) {
+                    composable("welcome") { WelcomeScreen(app) }
+                    composable("loading") { LoadingScreen(app) }
+                    composable("login") { LoginScreen(app) }
+                    composable("register") { RegisterScreen(app) }
+                    composable("character") { CharacterScreen(app) }
+                    composable("story") { StoryScreen(app) }
+                    composable("dashboard") { DashboardScreen(app) }
+                    composable("question") { QuestionScreen(app) }
+                    composable("running") { RunningScreen(app) }
+                    composable("profile") { ProfileScreen(app) }
+                    composable("complete") { CompleteScreen(app) }
+                    composable("gameover") { GameOverScreen(app) }
+                    composable("ending") { EndingScreen(app) }
+                    composable("logout") { ResultScreen(app, title = "Logged out", message = "See you next time!") }
+                }
+                if (app.showSettings) {
+                    SettingsScreen(app)
+                }
             }
         }
     }
@@ -131,12 +136,31 @@ fun GameApp(activity: Activity) {
 
 private fun routeFor(state: FlowState): String = FlowTransitions.routePath(state)
 
+/** Loads a bundled image off the main thread; used for logos and previews. */
+@Composable
+fun AssetImage(name: String, modifier: Modifier = Modifier, contentScale: ContentScale = ContentScale.Fit) {
+    val context = LocalContext.current
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, name) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            codeescape.android.render.SpriteAssets.loadBitmap(context, name)
+        }
+    }
+    val bmp = bitmap
+    if (bmp != null) {
+        Image(bitmap = bmp.asImageBitmap(), contentDescription = null, modifier = modifier, contentScale = contentScale)
+    }
+}
+
 @Composable
 fun BackgroundImage(name: String, modifier: Modifier = Modifier, alpha: Float = 1f) {
-    val ctx = LocalContext.current
-    val bmp = remember(name) {
-        try { ctx.assets.open(name).use { BitmapFactory.decodeStream(it) } } catch (_: Exception) { null }
+    val context = LocalContext.current
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, name) {
+        val metrics = context.resources.displayMetrics
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            codeescape.android.render.SpriteAssets.loadSampledBitmap(context, name, metrics.widthPixels, metrics.heightPixels)
+        }
     }
+    val bmp = bitmap
     if (bmp != null) {
         Image(bitmap = bmp.asImageBitmap(), contentDescription = null, modifier = modifier, contentScale = ContentScale.Crop, alpha = alpha)
     }
@@ -164,6 +188,7 @@ fun ScreenScaffold(bg: String? = null, overlayAlpha: Float = 0.45f, content: @Co
 @Composable
 fun WelcomeScreen(app: GameAppState) {
     ScreenScaffold(bg = "castle.png", overlayAlpha = 0.35f) {
+        AssetImage("logo.png", Modifier.width(180.dp).height(142.dp))
         Text("CODE ESCAPE", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFF5AF5E6))
         Text("Shared core • Android (Compose + Canvas)", color = Color.White.copy(alpha = 0.9f), textAlign = TextAlign.Center)
         Spacer(Modifier.height(12.dp))
@@ -393,10 +418,16 @@ fun CharacterScreen(app: GameAppState) {
                     if (previewVariant != null) {
                         val previewName = codeescape.android.render.SpriteAssets.standingOrVariantFile(isGirl, previewVariant)
                         val ctx = LocalContext.current
-                        val bmp = remember(previewName) {
-                            codeescape.android.render.SpriteAssets.loadBitmap(ctx, previewName)
+                        val metrics = ctx.resources.displayMetrics
+                        val bmp by produceState<android.graphics.Bitmap?>(initialValue = null, previewName) {
+                            value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                codeescape.android.render.SpriteAssets.loadSampledBitmap(
+                                    ctx, previewName, metrics.widthPixels / 2, metrics.heightPixels / 2
+                                )
+                            }
                         }
-                        if (bmp != null) {
+                        val previewBitmap = bmp
+                        if (previewBitmap != null) {
                             Column(
                                 modifier = Modifier.fillMaxSize(),
                                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -409,7 +440,7 @@ fun CharacterScreen(app: GameAppState) {
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 Image(
-                                    bitmap = bmp.asImageBitmap(),
+                                    bitmap = previewBitmap.asImageBitmap(),
                                     contentDescription = "Selected character preview",
                                     modifier = Modifier.fillMaxWidth().weight(1f),
                                     contentScale = ContentScale.Fit
@@ -515,7 +546,15 @@ fun StoryScreen(app: GameAppState) {
                         lineHeight = 22.sp,
                         textAlign = TextAlign.Center
                     )
-                    if (app.narration.isSupported) {
+                    if (!app.ttsEnabled) {
+                        Text(
+                            "Narration off (disabled in Settings).",
+                            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                            color = Color(0xFF9FD8FF),
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    } else if (app.narration.isSupported) {
                         Text(
                             if (app.storyHighlightRange != null) "Narration playing (best-effort highlight)…" else "Narration ready (best-effort).",
                             modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
@@ -534,12 +573,63 @@ fun StoryScreen(app: GameAppState) {
 }
 
 @Composable
+fun SettingsScreen(app: GameAppState) {
+    BackHandler { app.closeSettings() }
+    Box(Modifier.fillMaxSize().background(Color(0xE6071522))) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp, vertical = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically)
+        ) {
+            Text("SETTINGS", fontSize = 30.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFFFD54A))
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xE610263D)),
+                modifier = Modifier.fillMaxWidth().widthIn(max = 480.dp)
+            ) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    SettingSwitch("Background Music", app.musicEnabled) { app.updateMusicEnabled(it) }
+                    SettingSwitch("Mute All Sound", app.muted) { app.updateMuted(it) }
+                    Text("Volume: ${(app.volume * 100).toInt()}%", color = Color.White, fontSize = 15.sp)
+                    Slider(
+                        value = app.volume,
+                        onValueChange = { app.updateVolume(it) },
+                        valueRange = 0f..1f,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    SettingSwitch("Text-to-Speech Narration", app.ttsEnabled) { app.updateTtsEnabled(it) }
+                }
+            }
+            Button(
+                onClick = { app.closeSettings() },
+                modifier = Modifier.fillMaxWidth().widthIn(max = 480.dp)
+            ) { Text("DONE") }
+        }
+    }
+}
+
+@Composable
+private fun SettingSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = Color.White, fontSize = 16.sp)
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
 fun DashboardScreen(app: GameAppState) {
     val p = app.currentProfile
     val session = app.engine.session
     val lifetimeXp = (p?.lifetimeXp ?: try { app.profileRepo.getLifetimeXp(app.currentUsername ?: "") } catch (_: Exception) { session.savedXpBeforeRun }).coerceAtLeast(0)
-    val displayedXp = if (session.showZeroXpAfterCancelledRun) 0 else lifetimeXp
+    val displayedXp = lifetimeXp
     ScreenScaffold(bg = "castle.png", overlayAlpha = 0.45f) {
+        AssetImage("logo.png", Modifier.width(140.dp).height(110.dp))
         Text("CODE ESCAPE", fontSize = 30.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFFFD54A))
         Text("WELCOME, ${(app.currentUsername ?: "PLAYER").uppercase()}", color = Color(0xFFF2EFE2), fontSize = 15.sp)
         Card(colors = CardDefaults.cardColors(containerColor = Color(0xE6051C43)), shape = RoundedCornerShape(18.dp)) {
@@ -555,6 +645,7 @@ fun DashboardScreen(app: GameAppState) {
         val menuWidth = Modifier.fillMaxWidth().widthIn(max = 420.dp)
         Button(onClick = { app.startLessonFromBeginning() }, modifier = menuWidth) { Text("▶  PLAY") }
         OutlinedButton(onClick = { app.openProfile() }, modifier = menuWidth) { Text("PROFILE") }
+        OutlinedButton(onClick = { app.openSettings() }, modifier = menuWidth) { Text("SETTINGS") }
         OutlinedButton(
             onClick = { app.openLogoutDialog() },
             modifier = menuWidth,

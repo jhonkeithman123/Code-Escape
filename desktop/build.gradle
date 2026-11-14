@@ -36,15 +36,43 @@ jar {
 }
 
 tasks.register("packageRelease") {
-    dependsOn("jar")
+    group = "distribution"
+    description = "Builds the desktop Windows app image (.exe bundle) via jpackage."
+    dependsOn("packageAppImage")
+}
+
+// Self-contained Windows executable bundle (app image with CodeEscape.exe launcher).
+// Requires a JDK with jpackage (JDK 14+); the Gradle runtime JDK is used.
+tasks.register("packageAppImage") {
+    group = "distribution"
+    description = "Builds a self-contained desktop app image with an .exe launcher via jpackage."
+    dependsOn("installDist")
     doLast {
-        def v = project.version.toString()
-        def outDir = file("${rootDir}/output/v${v}/desktop")
-        outDir.mkdirs()
-        copy {
-            from(tasks.named("jar").get().archiveFile)
-            into(outDir)
+        def jpackage = "${System.getProperty('java.home')}/bin/jpackage"
+        def exe = file(jpackage).exists() ? file(jpackage) : file("${jpackage}.exe")
+        if (!exe.exists()) {
+            throw new GradleException("jpackage not found in ${System.getProperty('java.home')}. Use JDK 14+ to build the app image.")
         }
-        println("Desktop artifact packaged to: ${outDir}")
+        def v = project.version.toString()
+        def outDir = file("${rootDir}/output/v${v}/desktop-exe")
+        outDir.mkdirs()
+        def iconFile = file("${rootDir}/desktop/src/main/resources/app.ico")
+        def args = [exe.absolutePath]
+        args += ["--type", "app-image"]
+        if (iconFile.exists()) {
+            args += ["--icon", iconFile.absolutePath]
+        }
+        args += [
+            "--name", "CodeEscape",
+            "--app-version", v,
+            "--description", "Code Escape - Gamified Programming Learning System",
+            "--vendor", "Code Escape",
+            "--input", file("${buildDir}/install/desktop").absolutePath,
+            "--main-jar", "lib/CodeEscape-${v}.jar",
+            "--main-class", "codeescape.desktop.DesktopApp",
+            "--dest", outDir.absolutePath
+        ]
+        exec { commandLine args }
+        println("Desktop app image packaged to: ${outDir}")
     }
 }

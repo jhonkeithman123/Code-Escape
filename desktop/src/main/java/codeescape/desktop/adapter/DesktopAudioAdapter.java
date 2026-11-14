@@ -7,11 +7,18 @@ import java.io.*;
 public class DesktopAudioAdapter implements AudioPort {
     private Clip backgroundMusic;
     private boolean musicEnabled = true;
+    private boolean muted = false;
     private float musicVolume = 0.45f;
     private int currentMusicLevel = 1;
 
     @Override public void setEnabled(boolean enabled) { this.musicEnabled = enabled; if (!enabled) stopMusic(); }
     @Override public boolean isEnabled() { return musicEnabled; }
+    @Override public void setMuted(boolean muted) {
+        this.muted = muted;
+        if (muted) stopMusic();
+        else applyVolume();
+    }
+    @Override public boolean isMuted() { return muted; }
     @Override public void setVolume(float volume01) { this.musicVolume = Math.max(0f, Math.min(1f, volume01)); applyVolume(); }
     @Override public float getVolume() { return musicVolume; }
 
@@ -30,7 +37,7 @@ public class DesktopAudioAdapter implements AudioPort {
 
     @Override
     public void playFeedback(boolean correct) {
-        if (!musicEnabled) return;
+        if (!musicEnabled || muted) return;
         String[] names = correct
                 ? new String[]{"correct.wav", "success.wav", "correct.mp3", "sfx/correct.wav", "music/correct.wav", "audio/correct.wav"}
                 : new String[]{"wrong.wav", "error.wav", "wrong.mp3", "sfx/wrong.wav", "music/wrong.wav", "audio/wrong.wav"};
@@ -81,7 +88,7 @@ public class DesktopAudioAdapter implements AudioPort {
 
     public void playSpecialMusic(String fileName) { playMusicFile(fileName, "Special music"); }
     public void playMainMenuMusic() { playMusicFile(codeescape.core.content.AudioCatalog.TRACK_MAIN_MENU, "Main menu music"); }
-    public void startBackgroundMusic() { if (musicEnabled) playMainMenuMusic(); }
+    public void startBackgroundMusic() { if (musicEnabled && !muted) playMainMenuMusic(); }
     public Clip getClip() { return backgroundMusic; }
 
     private AudioInputStream openMusic(String fileName) throws Exception {
@@ -103,7 +110,7 @@ public class DesktopAudioAdapter implements AudioPort {
     }
 
     private void playMusicFile(String fileName, String errorLabel) {
-        if (!musicEnabled) return;
+        if (!musicEnabled || muted) return;
         try {
             if (backgroundMusic != null) {
                 backgroundMusic.stop();

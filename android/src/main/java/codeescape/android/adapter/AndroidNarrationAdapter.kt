@@ -21,6 +21,7 @@ class AndroidNarrationAdapter(context: Context) : NarrationPort {
     private var tts: TextToSpeech? = null
     @Volatile private var ready = false
     @Volatile private var speaking = false
+    @Volatile private var enabled = true
     @Volatile private var pendingComplete: (() -> Unit)? = null
     var onStart: (() -> Unit)? = null
     var onDone: (() -> Unit)? = null
@@ -95,6 +96,13 @@ class AndroidNarrationAdapter(context: Context) : NarrationPort {
 
     override fun isSupported(): Boolean = ready
 
+    override fun setEnabled(enabled: Boolean) {
+        this.enabled = enabled
+        if (!enabled) stopInternal(clearPending = true)
+    }
+
+    override fun isEnabled(): Boolean = enabled
+
     override fun speakStory(text: String?) {
         speakStory(text, null as NarrationCallback?)
     }
@@ -102,6 +110,10 @@ class AndroidNarrationAdapter(context: Context) : NarrationPort {
     override fun speakStory(text: String?, callback: NarrationCallback?) {
         val t = text?.trim().orEmpty()
         if (t.isEmpty()) {
+            try { callback?.onComplete() } catch (_: Exception) {}
+            return
+        }
+        if (!enabled) {
             try { callback?.onComplete() } catch (_: Exception) {}
             return
         }

@@ -11,6 +11,7 @@ public final class LoginScreen {
         JPanel background(String name);
         JPanel panel(int w, int h);
         void title(JPanel box, String text);
+        JLabel image(String name, int w, int h);
         JTextField textField(String tip);
         JPasswordField passwordField(String tip);
         JButton gold(String text);
@@ -25,8 +26,12 @@ public final class LoginScreen {
     public static JPanel create(Host h) {
         JPanel p = h.background("level5.png");
         p.setLayout(new GridBagLayout());
-        JPanel box = h.panel(350, 520);
+        JPanel box = h.panel(350, 560);
         box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
+        JLabel logo = h.image("logo.png", 180, 112);
+        logo.setAlignmentX(Component.CENTER_ALIGNMENT);
+        box.add(logo);
+        box.add(Box.createVerticalStrut(10));
         h.title(box, "LOGIN");
 
         JTextField user = h.textField("Username / Email");

@@ -8,16 +8,64 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import java.io.BufferedInputStream
+import java.util.concurrent.ConcurrentHashMap
 
 object SpriteAssets {
+    private val bitmapCache = ConcurrentHashMap<String, Bitmap>()
+    private val walkFrameCache = ConcurrentHashMap<String, List<Bitmap>>()
+
+    /**
+     * Loads a bundled image, cached by name. Prefer [loadSampledBitmap] for large
+     * artwork so the decoded size matches what is actually displayed.
+     */
     fun loadBitmap(context: Context, name: String): Bitmap? {
+        return bitmapCache.getOrPut(name) { decode(context, name, 0, 0) }
+    }
+
+    /**
+     * Loads a bundled image downsampled to roughly the requested dimensions.
+     * Uses BitmapFactory's inSampleSize so full-size artwork never sits in memory.
+     */
+    fun loadSampledBitmap(context: Context, name: String, reqWidth: Int, reqHeight: Int): Bitmap? {
+        if (reqWidth <= 0 || reqHeight <= 0) return loadBitmap(context, name)
+        val key = "$name@${reqWidth}x${reqHeight}"
+        return bitmapCache.getOrPut(key) { decode(context, name, reqWidth, reqHeight) }
+    }
+
+    private fun decode(context: Context, name: String, reqWidth: Int, reqHeight: Int): Bitmap? {
         return try {
-            context.assets.open(name).use { input ->
-                BitmapFactory.decodeStream(BufferedInputStream(input))
+            if (reqWidth <= 0 || reqHeight <= 0) {
+                context.assets.open(name).use { input ->
+                    BitmapFactory.decodeStream(BufferedInputStream(input))
+                }
+            } else {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                context.assets.open(name).use { input ->
+                    BitmapFactory.decodeStream(BufferedInputStream(input), null, bounds)
+                }
+                val options = BitmapFactory.Options().apply {
+                    inSampleSize = computeSampleSize(bounds.outWidth, bounds.outHeight, reqWidth, reqHeight)
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                context.assets.open(name).use { input ->
+                    BitmapFactory.decodeStream(BufferedInputStream(input), null, options)
+                }
             }
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun computeSampleSize(width: Int, height: Int, reqWidth: Int, reqHeight: Int): Int {
+        var sample = 1
+        if (height > reqHeight || width > reqWidth) {
+            val halfHeight = height / 2
+            val halfWidth = width / 2
+            while (halfHeight / sample >= reqHeight && halfWidth / sample >= reqWidth) {
+                sample *= 2
+            }
+        }
+        return sample
     }
 
     fun runnerOutfitFile(isGirl: Boolean, variantIndex: Int): String {
@@ -43,9 +91,14 @@ object SpriteAssets {
     /**
      * Port of desktop loadIsolatedWalkFrames: trims each authored pose to alpha bounds
      * and places it on a shared bottom-aligned transparent canvas.
+     *
+     * Frames are cached per source file and the alpha-bound scan uses a single
+     * getPixels pass instead of per-pixel getPixel calls (much faster on device).
      */
     fun loadIsolatedWalkFrames(context: Context, file: String): List<Bitmap>? {
         if (!Regex("modern_(boy|girl)_(walk(_v[1-4])?|run_v[1-4])\\.png").matches(file)) return null
+        walkFrameCache[file]?.let { return it }
+
         val source = loadBitmap(context, file) ?: return null
         val count = when {
             source.width == 2240 && source.height == 380 -> 8
@@ -57,13 +110,17 @@ object SpriteAssets {
         var canvasWidth = 1
         var canvasHeight = 1
 
+        val pixels = IntArray(source.width * source.height)
+        source.getPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
+
         for (i in 0 until count) {
             var minX = cellWidth; var minY = source.height
             var maxX = -1; var maxY = -1
             val startX = i * cellWidth
             for (y in 0 until source.height) {
+                val rowOffset = y * source.width
                 for (x in startX until (i + 1) * cellWidth) {
-                    val alpha = (source.getPixel(x, y) ushr 24) and 0xFF
+                    val alpha = (pixels[rowOffset + x] ushr 24) and 0xFF
                     if (alpha > 8) {
                         val lx = x - startX
                         if (lx < minX) minX = lx
@@ -94,6 +151,7 @@ object SpriteAssets {
             c.drawBitmap(source, src, dst, paint)
             out.add(frame)
         }
+        walkFrameCache[file] = out
         return out
     }
 }

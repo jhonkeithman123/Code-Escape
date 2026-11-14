@@ -16,8 +16,11 @@ public class WindowsNarrationAdapter implements NarrationPort {
     private Process storySpeechProcess;
     private Thread storySpeechThread;
     private volatile int storySpeechGeneration = 0;
+    private volatile boolean enabled = true;
 
     @Override public boolean isSupported() { return System.getProperty("os.name", "").toLowerCase().contains("win"); }
+    @Override public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    @Override public boolean isEnabled() { return enabled; }
     @Override public void speakStory(String text) { speakStory(text, (NarrationCallback) null); }
     @Override public void stop() { stop(null, null); }
 
@@ -40,6 +43,7 @@ public class WindowsNarrationAdapter implements NarrationPort {
 
     public void speakStory(String text, NarrationCallback callback, Runnable onMusicPauseResume) {
         stop(null, null);
+        if (!enabled) { if (callback != null) callback.onComplete(); return; }
         if (!isSupported()) { if (callback != null) callback.onComplete(); return; }
         final int generation = ++storySpeechGeneration;
         final List<int[]> ranges = buildStoryRanges(text);
