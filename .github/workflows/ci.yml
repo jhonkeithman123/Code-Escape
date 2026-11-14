@@ -25,22 +25,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Gradle 8.7 runs on JDK 8+, but AGP 8.2.2 requires JDK 17, so the Gradle
-      # runtime is always 17. Compilation/test toolchains are provisioned
-      # deterministically via the Foojay resolver (see gradle.properties); the
-      # matrix JDK is still installed so other tooling can use it.
+      # Gradle 8.7 runs on JDK 8+, but AGP 8.2.2 requires JDK 17 to run Gradle,
+      # so the Gradle runtime is always 17. Matrix "java" only verifies toolchains
+      # are provisioned/available for compilation checks.
       - name: Set up JDK 17 (Gradle runtime)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up JDK ${{ matrix.java }} (runtime availability check)
+      - name: Set up JDK ${{ matrix.java }} (toolchain availability)
         if: matrix.java != '17'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
+
+      - name: Force Gradle runtime to JDK 17
+        shell: bash
+        run: echo "JAVA_HOME=${JAVA_HOME_17_X64:-$JAVA_HOME_17}" >> "$GITHUB_ENV"
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v4
@@ -62,7 +65,6 @@ jobs:
             G="gradle"
           fi
           echo "Using Gradle command: $G"
-          # Core/desktop are configured for Java 8 bytecode/toolchain compatibility.
           $G :core:build :desktop:build :core:test :desktop:test --stacktrace
 
   android-checks:
@@ -100,14 +102,6 @@ jobs:
           fi
           echo "Using Gradle command: $G"
           $G :android:assembleDebug :android:lintDebug :android:packageReleaseArtifacts --stacktrace
-
-      # packageReleaseArtifacts above falls back to the debug APK when release
-      # signing is absent, so this stays green without secrets. To produce a
-      # signed release APK in CI, expose the four secrets below as environment
-      # variables (same precedence chain documented in keystore.properties.example):
-      #   ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD,
-      #   ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
-      # then additionally run: $G :android:assembleRelease
 
       - name: Run Android unit tests (if present)
         shell: bash
